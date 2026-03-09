@@ -1,11 +1,13 @@
 /**
  * Neuralix Web Tester — Service Worker
  *
- * Stratégie : Cache-first avec vérification réseau en arrière-plan.
- * À chaque nouvelle version, incrémente CACHE_VERSION pour forcer le refresh.
+ * Stratégie : Network-first avec fallback cache.
+ * En ligne  → toujours la dernière version (+ mise en cache)
+ * Hors-ligne → version cachée
+ * À chaque nouvelle version, incrémente CACHE_VERSION pour purger l'ancien cache.
  */
 
-const CACHE_VERSION = 'neuralix-v2';
+const CACHE_VERSION = 'neuralix-v3';
 
 const FILES_TO_CACHE = [
     './',
@@ -30,7 +32,7 @@ self.addEventListener('install', (event) => {
     self.skipWaiting();
 });
 
-// Activate : supprime les anciens caches
+// Activate : supprime les anciens caches, prend le contrôle immédiatement
 self.addEventListener('activate', (event) => {
     event.waitUntil(
         caches.keys().then((keys) =>
@@ -42,25 +44,25 @@ self.addEventListener('activate', (event) => {
     self.clients.claim();
 });
 
-// Fetch : sert depuis le cache, met à jour en arrière-plan
+// Fetch : network-first, fallback cache
 self.addEventListener('fetch', (event) => {
-    // Ignore les requêtes non-GET et les requêtes cross-origin
     if (event.request.method !== 'GET') return;
     if (!event.request.url.startsWith(self.location.origin)) return;
 
     event.respondWith(
-        caches.match(event.request).then((cached) => {
-            // Lancer une mise à jour réseau en arrière-plan (stale-while-revalidate)
-            const networkFetch = fetch(event.request).then((response) => {
+        fetch(event.request)
+            .then((response) => {
+                // Réseau OK → mettre en cache et servir
                 if (response && response.status === 200) {
                     const clone = response.clone();
                     caches.open(CACHE_VERSION).then((cache) => cache.put(event.request, clone));
                 }
                 return response;
-            }).catch(() => cached);
-
-            return cached || networkFetch;
-        })
+            })
+            .catch(() => {
+                // Hors-ligne → servir depuis le cache
+                return caches.match(event.request);
+            })
     );
 });
 
