@@ -25,6 +25,7 @@
             { id: 'statsSection',      icon: '\uD83D\uDCCA', label: 'Statistiques',          requiresData: true },
             { id: 'reportSection',     icon: '\uD83D\uDCBE', label: 'Sauvegarde',            requiresData: true },
             { id: 'configSection',     icon: '\uD83D\uDD27', label: 'Configuration',          alwaysOn: true },
+            { id: 'presetsSection',    icon: '\uD83D\uDCBE', label: 'Profils / Presets' },
             { id: 'logSection',        icon: '\uD83D\uDCDD', label: 'Console',               alwaysOn: true }
         ],
         analysis: [

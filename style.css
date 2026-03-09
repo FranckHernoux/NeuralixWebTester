@@ -1737,7 +1737,8 @@ body.sidebar-open .sidebar-toggle-icon {
 body.sidebar-open header,
 body.sidebar-open #tabBar,
 body.sidebar-open #mainSections,
-body.sidebar-open #tabMultifile {
+body.sidebar-open #tabMultifile,
+body.sidebar-open #tabComparative {
     margin-left: 220px;
     transition: margin-left 0.25s ease;
 }
@@ -1745,7 +1746,8 @@ body.sidebar-open #tabMultifile {
 body:not(.sidebar-open) header,
 body:not(.sidebar-open) #tabBar,
 body:not(.sidebar-open) #mainSections,
-body:not(.sidebar-open) #tabMultifile {
+body:not(.sidebar-open) #tabMultifile,
+body:not(.sidebar-open) #tabComparative {
     margin-left: 0;
     transition: margin-left 0.25s ease;
 }
