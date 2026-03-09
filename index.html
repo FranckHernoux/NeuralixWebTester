@@ -1,0 +1,1171 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neuralix Web Tester - Sleep Stage Classifier</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#3b82f6">
+    <link rel="icon" type="image/svg+xml" href="icons/icon.svg">
+    <link rel="apple-touch-icon" href="icons/icon.svg">
+</head>
+<body>
+    <!-- Header -->
+    <header>
+        <div class="header-left">
+            <h1>NEURALIX <span class="subtitle">Web Tester</span></h1>
+            <span class="version">Sleep Stage Classifier - ESP32-S3</span>
+        </div>
+        <div class="header-right">
+            <span id="connectionStatus" class="status disconnected">Déconnecté</span>
+        </div>
+    </header>
+
+    <!-- Barre d'onglets -->
+    <nav id="tabBar">
+        <button class="tab-btn active" data-tab="realtime">Classification temps réel</button>
+        <button class="tab-btn" data-tab="analysis">Analyse d'un fichier</button>
+        <button class="tab-btn" data-tab="multifile">Analyse multi-fichiers</button>
+        <button class="tab-btn" data-tab="comparative">Comparatif algos</button>
+    </nav>
+
+    <!-- ================================================================== -->
+    <!-- Sidebar de visibilite des sections                                 -->
+    <!-- ================================================================== -->
+    <button id="sidebarToggleBtn" class="sidebar-toggle-btn" title="Afficher/masquer les sections">
+        <span class="sidebar-toggle-icon"></span>
+    </button>
+    <aside id="sectionSidebar" class="section-sidebar collapsed">
+        <button id="sidebarLockBtn" class="sidebar-lock-btn" title="Verrouiller le bandeau ouvert">&#x1F513;</button>
+        <div class="sidebar-items" id="sidebarItems">
+            <!-- Rempli dynamiquement par sidebar.js -->
+        </div>
+        <div class="sidebar-zoom-group" id="sidebarZoom">
+            <label class="sidebar-zoom-label" id="sidebarZoomLabel">Zoom : 100%</label>
+            <input type="range" class="sidebar-zoom-slider" id="sidebarZoomSlider"
+                   min="50" max="150" step="5" value="100">
+        </div>
+    </aside>
+
+    <!-- ================================================================== -->
+    <!-- Sections principales (onglets 1 & 2 partagent ces sections)        -->
+    <!-- ================================================================== -->
+    <div id="mainSections" class="tab-content active">
+
+    <!-- Barre de controles -->
+    <section id="controls" data-tabs="realtime">
+        <div class="control-group">
+            <button id="btnConnect" class="btn btn-primary">Connecter Serial</button>
+            <button id="btnDisconnect" class="btn btn-danger" disabled>Déconnecter</button>
+        </div>
+        <div class="control-group">
+            <label class="btn btn-secondary file-label">
+                Charger fichier EOG
+                <input type="file" id="fileInput" accept=".txt,.csv,.tsv,.dat" hidden>
+            </label>
+            <span id="fileName" class="file-info">Aucun fichier</span>
+        </div>
+        <div class="control-group">
+            <button id="btnStart" class="btn btn-success" disabled>Démarrer</button>
+            <button id="btnPause" class="btn btn-warning" disabled>Pause</button>
+            <button id="btnStop" class="btn btn-danger" disabled>Stop</button>
+            <button id="btnReset" class="btn btn-secondary" disabled>Reset</button>
+        </div>
+        <div class="control-group">
+            <label>Vitesse d'envoi:</label>
+            <select id="speedSelect">
+                <option value="1">Temps réel — 256 Hz (~35s/epoch)</option>
+                <option value="2">2x — 512 Hz (~20s/epoch)</option>
+                <option value="5">5x — 1280 Hz (~11s/epoch)</option>
+                <option value="10">10x — 2560 Hz (~8s/epoch)</option>
+                <option value="30">30x — rapide (~5s/epoch)</option>
+                <option value="0" selected>Maximum — limite par ESP32 (~4-9s/epoch)</option>
+            </select>
+            <span id="speedInfo" class="speed-info"></span>
+        </div>
+    </section>
+
+    <!-- Zone de progression -->
+    <section id="progressSection" data-tabs="realtime">
+        <div class="progress-bar-container">
+            <div id="progressBar" class="progress-bar"></div>
+        </div>
+        <div class="progress-info">
+            <span id="epochInfo">Epoch 0 / 0</span>
+            <span id="timeInfo">00:00 / 00:00:00</span>
+            <span id="sendingInfo">En attente...</span>
+            <span id="epochTiming" class="epoch-timing"></span>
+        </div>
+    </section>
+
+    <!-- Chargement fichier (onglet Analyse) -->
+    <section id="analysisLoaderSection" data-tabs="analysis">
+        <h2>Charger un fichier</h2>
+        <div class="control-group" style="flex-wrap:wrap; gap:8px; align-items:center;">
+            <label class="btn btn-primary file-label">
+                Charger données EOG (.txt)
+                <input type="file" id="analysisDataInput" accept=".txt,.csv,.tsv,.dat" hidden>
+            </label>
+            <span id="analysisDataName" class="file-info">Aucun fichier</span>
+        </div>
+        <div class="control-group" style="flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px;">
+            <label class="btn btn-secondary file-label">
+                Charger session analysée (.json)
+                <input type="file" id="analysisJsonInput" accept=".json" hidden>
+            </label>
+            <span id="analysisJsonName" class="file-info">Aucune session</span>
+        </div>
+        <p id="analysisHint" class="config-note" style="display:none; margin-top:8px;"></p>
+    </section>
+
+    <!-- Dashboard récapitulatif -->
+    <section id="dashboardSection" data-tabs="analysis">
+        <h2>Dashboard</h2>
+        <div class="stats-grid" id="dashboardGrid"></div>
+    </section>
+
+    <!-- Signal EOG Nuit complete -->
+    <section id="fullNightSection" data-tabs="realtime analysis">
+        <h2>Signal EOG (nuit complète)</h2>
+        <div class="fullnight-toolbar">
+            <div class="fullnight-info">
+                <span id="fullNightRange">Aucun fichier chargé</span>
+            </div>
+            <div class="fullnight-curves">
+                <label class="fn-curve-label">
+                    <input type="checkbox" id="fnShowBrut" checked>
+                    <span class="fn-curve-swatch" style="background:#4a9eff;"></span> EOG brut
+                </label>
+                <label class="fn-curve-label">
+                    <input type="checkbox" id="fnShowFiltre">
+                    <span class="fn-curve-swatch" style="background:#f59e0b;"></span> EOG filtrée
+                </label>
+            </div>
+            <div class="fn-mode-toggle">
+                <button id="fnModeSeparate" class="btn btn-small fn-mode-btn fn-mode-active">Séparer</button>
+                <button id="fnModeOverlay"  class="btn btn-small fn-mode-btn">Superposer</button>
+            </div>
+            <div class="fullnight-controls">
+                <button id="btnFnZoomIn"    class="btn btn-small">Zoom +</button>
+                <button id="btnFnZoomOut"   class="btn btn-small">Zoom -</button>
+                <button id="btnFnZoomReset" class="btn btn-small">Vue complète</button>
+            </div>
+        </div>
+        <div id="fullNightWrapper">
+            <canvas id="fullNightCanvas" width="1200" height="250"></canvas>
+            <div id="fullNightSelection"></div>
+        </div>
+        <div id="fullNightResizeHandle" title="Glisser pour redimensionner"></div>
+        <div class="fullnight-scroll-container" id="fullNightScrollContainer" style="display:none;">
+            <input type="range" id="fullNightScroll" min="0" max="1000" value="0" step="1" class="fullnight-slider">
+        </div>
+    </section>
+
+    <!-- Signal EOG (epoch courante) -->
+    <section id="signalSection" data-tabs="realtime analysis">
+        <h2>Signal EOG (epoch courante)</h2>
+        <canvas id="signalCanvas" width="1200" height="200"></canvas>
+    </section>
+
+    <!-- Hypnogramme -->
+    <section id="hypnogramSection" data-tabs="realtime analysis">
+        <h2>Hypnogramme</h2>
+        <div class="hypno-toolbar">
+            <div class="hypnogram-legend">
+                <span class="legend-item stage-W">Wake</span>
+                <span class="legend-item stage-N1">N1</span>
+                <span class="legend-item stage-N2">N2</span>
+                <span class="legend-item stage-N3">N3</span>
+                <span class="legend-item stage-REM">REM</span>
+            </div>
+            <div class="hypno-zoom-controls">
+                <button id="btnZoomIn"    class="btn btn-small">Zoom +</button>
+                <button id="btnZoomOut"   class="btn btn-small">Zoom -</button>
+                <button id="btnZoomReset" class="btn btn-small" disabled>Vue complète</button>
+                <span id="hypnoZoomInfo" class="zoom-info"></span>
+            </div>
+            <div class="hypno-visibility">
+                <label><input type="checkbox" id="hypnoShowNeuralix" checked> <span style="color:#3b82f6">Neuralix</span></label>
+                <label><input type="checkbox" id="hypnoShowA1" checked> <span style="color:#ef4444">Annot. 1</span></label>
+                <label><input type="checkbox" id="hypnoShowA2" checked> <span style="color:#22c55e">Annot. 2</span></label>
+                <span class="hypno-mask-control">
+                    <span style="color:#9aa0a6">Masque :</span>
+                    <input type="range" id="hypnoMaskOpacity" min="0" max="100" step="5" value="60" style="width:80px;">
+                    <span id="hypnoMaskLabel" style="color:#9aa0a6;min-width:30px;">60%</span>
+                </span>
+            </div>
+        </div>
+        <div id="hypnoWrapper">
+            <canvas id="hypnogramCanvas" width="1200" height="250"></canvas>
+            <div id="hypnoSelection"></div>
+        </div>
+        <div class="hypno-band-legend" id="hypnoBandLegend" style="display:none;">
+            <div class="legend-group" id="legendCycles">
+                <span class="legend-group-title">Cycles</span>
+                <span><span class="band-swatch" style="background:rgba(74,158,255,0.35);"></span>C1</span>
+                <span><span class="band-swatch" style="background:rgba(52,211,153,0.35);"></span>C2</span>
+                <span><span class="band-swatch" style="background:rgba(251,191,36,0.35);"></span>C3</span>
+                <span><span class="band-swatch" style="background:rgba(168,85,247,0.35);"></span>C4</span>
+                <span><span class="band-swatch" style="background:rgba(236,72,153,0.35);"></span>C5</span>
+            </div>
+            <div class="legend-group" id="legendConfidence">
+                <span class="legend-group-title">Confiance</span>
+                <span><span class="band-swatch" style="background:rgb(50,200,50);"></span>Haute</span>
+                <span><span class="band-swatch" style="background:rgb(255,200,50);"></span>Moyenne</span>
+                <span><span class="band-swatch" style="background:rgb(255,50,50);"></span>Faible</span>
+            </div>
+            <div class="legend-group" id="legendAnnot">
+                <span class="legend-group-title">Annotateurs</span>
+                <span><span class="band-swatch" style="background:rgba(52,211,153,0.6);"></span>Accord</span>
+                <span><span class="band-swatch" style="background:rgba(248,113,113,0.8);"></span>Désaccord</span>
+            </div>
+        </div>
+    </section>
+
+    <!-- Architecture du sommeil -->
+    <section id="sleepArchSection" data-tabs="analysis">
+        <h2>Architecture du sommeil</h2>
+        <div class="stats-grid" id="sleepArchGrid"></div>
+        <div id="stageDurationBars" style="margin-top:16px;">
+            <h3>Durée par stade</h3>
+            <canvas id="stageDurationCanvas" width="1200" height="180"></canvas>
+        </div>
+    </section>
+
+    <!-- Cycles de sommeil -->
+    <section id="sleepCyclesSection" data-tabs="analysis">
+        <h2>Cycles de sommeil</h2>
+        <div class="stats-grid" id="sleepCyclesGrid"></div>
+        <div id="cyclesDetail" style="margin-top:12px;">
+            <h3>Détail des cycles</h3>
+            <div class="table-container" style="max-height:300px;">
+                <table id="cyclesTable">
+                    <thead>
+                        <tr>
+                            <th>Cycle</th>
+                            <th>Début</th>
+                            <th>Fin</th>
+                            <th>Durée</th>
+                            <th>NREM</th>
+                            <th>REM</th>
+                        </tr>
+                    </thead>
+                    <tbody id="cyclesBody"></tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
+    <!-- Spectrogramme -->
+    <section id="spectrogramSection" data-tabs="analysis">
+        <h2>Spectrogramme (temps-fréquence)</h2>
+        <div class="spectrogram-toolbar">
+            <div class="control-group">
+                <label for="spectroMaxFreq">Fréquence max :</label>
+                <select id="spectroMaxFreq">
+                    <option value="30" selected>30 Hz</option>
+                    <option value="50">50 Hz</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label for="spectroWindowSize">Fenêtre FFT :</label>
+                <select id="spectroWindowSize">
+                    <option value="1024">1024 (4s)</option>
+                    <option value="2048" selected>2048 (8s)</option>
+                    <option value="4096">4096 (16s)</option>
+                </select>
+            </div>
+            <button id="btnComputeSpectro" class="btn btn-primary btn-small">Calculer</button>
+            <div class="spectro-zoom-controls">
+                <button id="btnSpectroZoomIn" class="btn btn-small">Zoom +</button>
+                <button id="btnSpectroZoomOut" class="btn btn-small">Zoom -</button>
+                <button id="btnSpectroZoomReset" class="btn btn-small" disabled>Vue complète</button>
+            </div>
+            <span id="spectroStatus" class="file-info"></span>
+            <span id="spectroZoomInfo" class="zoom-info"></span>
+        </div>
+        <div id="spectroContainer" class="freq-container">
+            <div class="freq-panel">
+                <h3>EOG brut</h3>
+                <div class="spectro-canvas-wrap">
+                    <canvas id="spectroCanvasBrut" width="600" height="300"></canvas>
+                    <div id="spectroSelBrut" class="spectro-selection"></div>
+                </div>
+            </div>
+            <div class="freq-panel">
+                <h3>EOG filtré</h3>
+                <div class="spectro-canvas-wrap">
+                    <canvas id="spectroCanvasFiltre" width="600" height="300"></canvas>
+                    <div id="spectroSelFiltre" class="spectro-selection"></div>
+                </div>
+            </div>
+        </div>
+        <div class="freq-legend">
+            <span class="freq-band" style="background:rgba(138,43,226,0.3);border-color:#8a2be2;">Delta (0.5-4 Hz)</span>
+            <span class="freq-band" style="background:rgba(0,191,255,0.3);border-color:#00bfff;">Theta (4-8 Hz)</span>
+            <span class="freq-band" style="background:rgba(50,205,50,0.3);border-color:#32cd32;">Alpha (8-13 Hz)</span>
+            <span class="freq-band" style="background:rgba(255,165,0,0.3);border-color:#ffa500;">Beta (13-30 Hz)</span>
+        </div>
+    </section>
+
+    <!-- Analyse frequentielle -->
+    <section id="frequencySection" data-tabs="analysis">
+        <h2>Analyse fréquentielle (nuit complète)</h2>
+        <div id="freqContainer" class="freq-container">
+            <div class="freq-panel">
+                <h3>EOG brut</h3>
+                <canvas id="freqCanvasBrut" width="600" height="300"></canvas>
+            </div>
+            <div class="freq-panel">
+                <h3>EOG filtré</h3>
+                <canvas id="freqCanvasFiltre" width="600" height="300"></canvas>
+            </div>
+        </div>
+        <div class="freq-legend">
+            <span class="freq-band" style="background:rgba(138,43,226,0.3);border-color:#8a2be2;">Delta (0.5-4 Hz)</span>
+            <span class="freq-band" style="background:rgba(0,191,255,0.3);border-color:#00bfff;">Theta (4-8 Hz)</span>
+            <span class="freq-band" style="background:rgba(50,205,50,0.3);border-color:#32cd32;">Alpha (8-13 Hz)</span>
+            <span class="freq-band" style="background:rgba(255,165,0,0.3);border-color:#ffa500;">Beta (13-30 Hz)</span>
+        </div>
+    </section>
+
+    <!-- Matrice de transitions -->
+    <section id="transitionSection" data-tabs="analysis">
+        <h2>Matrice de transitions</h2>
+        <div class="control-group" style="margin-bottom:12px;">
+            <label for="transitionSource">Source :</label>
+            <select id="transitionSource">
+                <option value="predictions" selected>Prédictions ESP32</option>
+                <option value="annot1">Annotateur 1</option>
+                <option value="annot2">Annotateur 2</option>
+            </select>
+        </div>
+        <div class="transition-row">
+            <canvas id="transitionCanvas" width="500" height="500"></canvas>
+            <div id="transitionInterpretation" class="transition-interp"></div>
+        </div>
+    </section>
+
+    <!-- Accord inter-annotateurs -->
+    <section id="annotAgreementSection" data-tabs="analysis">
+        <h2>Accord inter-annotateurs</h2>
+        <div class="stats-grid" id="annotKappaGrid"></div>
+    </section>
+
+    <!-- Qualité du signal -->
+    <section id="signalQualitySection" data-tabs="analysis">
+        <h2>Qualité du signal</h2>
+        <div class="stats-grid" id="signalQualityGrid"></div>
+        <div style="margin-top:12px;">
+            <h3>Amplitude par epoch</h3>
+            <canvas id="signalQualityCanvas" width="1200" height="120"></canvas>
+        </div>
+    </section>
+
+    <!-- Tableau d'historique -->
+    <section id="historySection" data-tabs="realtime analysis">
+        <h2>Historique des prédictions</h2>
+        <div class="history-legend">
+            <span class="legend-color lg-agree"></span> Unanime (3/3)
+            <span class="legend-color lg-partial"></span> Accord partiel (2/3)
+            <span class="legend-color lg-outlier"></span> Divergent
+            <span class="legend-color lg-wrong"></span> Aucun accord ESP32
+        </div>
+        <div class="table-container">
+            <table id="historyTable">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Temps</th>
+                        <th>ESP32</th>
+                        <th>Annot. 1</th>
+                        <th>Annot. 2</th>
+                        <th>Confiance</th>
+                        <th>Temps (ms)</th>
+                    </tr>
+                </thead>
+                <tbody id="historyBody">
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- Statistiques -->
+    <section id="statsSection" data-tabs="realtime analysis">
+        <h2>Statistiques</h2>
+        <div class="stats-filter-bar">
+            <label for="statsFilterSelect">Filtre:</label>
+            <select id="statsFilterSelect">
+                <option value="all">Tous (aucun filtre)</option>
+                <option value="a1_vs_ia">Annoteur 1 vs IA</option>
+                <option value="a2_vs_ia">Annoteur 2 vs IA</option>
+                <option value="a1_eq_a2">Annoteurs unanimes vs IA</option>
+                <option value="a1_ne_a2">Annoteurs en désaccord</option>
+                <option value="ia_ok_a1">IA correcte (vs Annot. 1)</option>
+                <option value="ia_ko_a1">IA incorrecte (vs Annot. 1)</option>
+                <option value="ia_ok_a2">IA correcte (vs Annot. 2)</option>
+                <option value="ia_ko_a2">IA incorrecte (vs Annot. 2)</option>
+                <option value="ia_consensus">IA = consensus annoteurs</option>
+                <option value="ia_no_consensus">IA != consensus annoteurs</option>
+                <option value="all_disagree">Aucun accord (3 différents)</option>
+            </select>
+            <span id="statsFilterInfo" class="stats-filter-info"></span>
+        </div>
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Epochs traitées</div>
+                <div class="stat-value" id="statEpochs">0</div>
+                <div class="stat-duration" id="statEpochsDuration"></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Précision vs Annot. 1</div>
+                <div class="stat-value" id="statAccA1">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Précision vs Annot. 2</div>
+                <div class="stat-value" id="statAccA2">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Temps moyen (ms)</div>
+                <div class="stat-value" id="statAvgTime">--</div>
+            </div>
+        </div>
+        <!-- Matrice de confusion -->
+        <div id="confusionSection" style="display:none;">
+            <h3>Distribution des prédictions ESP32</h3>
+            <div class="stats-grid" id="distributionGrid"></div>
+        </div>
+
+        <!-- Statistiques filtrées par seuil de confiance -->
+        <div id="confidenceFilterSection" style="display:none;">
+            <h3>Statistiques par seuil de confiance</h3>
+            <div class="confidence-control">
+                <label for="confidenceSlider">Seuil:</label>
+                <input type="range" id="confidenceSlider" min="0" max="100" step="1" value="60">
+                <input type="number" id="confidenceInput" min="0" max="100" step="1" value="60" class="confidence-number">
+                <span class="confidence-pct">%</span>
+                <span id="filteredCountLabel" class="filtered-count-label"></span>
+            </div>
+            <div class="stats-grid" id="filteredStatsGrid">
+                <div class="stat-card">
+                    <div class="stat-label">Epochs filtrées</div>
+                    <div class="stat-value" id="filtStatEpochs">0 / 0</div>
+                    <div class="stat-duration" id="filtStatEpochsDuration"></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Précision vs Annot. 1</div>
+                    <div class="stat-value" id="filtStatAccA1">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Précision vs Annot. 2</div>
+                    <div class="stat-value" id="filtStatAccA2">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Temps moyen (ms)</div>
+                    <div class="stat-value" id="filtStatAvgTime">--</div>
+                </div>
+            </div>
+            <div class="stats-grid" id="filteredDistributionGrid" style="margin-top:8px;"></div>
+        </div>
+    </section>
+
+    <!-- Courbe de calibration (Confiance vs Précision) -->
+    <section id="calibrationSection" data-tabs="analysis">
+        <h2>Courbe de calibration (Confiance vs Précision)</h2>
+        <p>Vérifie si la confiance du modèle est bien calibrée : un modèle parfait suit la diagonale.</p>
+        <canvas id="calibrationCanvas" width="500" height="400" style="max-width:100%;display:block;margin:0 auto;"></canvas>
+    </section>
+
+    <!-- Bland-Altman Plot -->
+    <section id="blandAltmanSection" data-tabs="analysis">
+        <h2>Bland-Altman Plot (IA vs Annotateurs)</h2>
+        <p>Visualise les biais systématiques entre IA et annotateurs par stade de sommeil.</p>
+        <canvas id="blandAltmanCanvas" width="900" height="400" style="max-width:100%;display:block;margin:0 auto;"></canvas>
+    </section>
+
+    <!-- ICC (Intraclass Correlation) -->
+    <section id="iccSection" data-tabs="analysis">
+        <h2>ICC (Intraclass Correlation Coefficient)</h2>
+        <p>Mesure la fiabilité de l'accord entre IA et annotateurs, plus robuste que le Kappa pour les données ordinales.</p>
+        <div class="stats-grid" id="iccGrid"></div>
+    </section>
+
+    <!-- Heatmap temporelle -->
+    <section id="heatmapSection" data-tabs="analysis">
+        <h2>Heatmap temporelle</h2>
+        <p>Carte de chaleur epoch par epoch : stade prédit, confiance, et zones d'erreur.</p>
+        <canvas id="heatmapCanvas" width="1200" height="250" style="max-width:100%;display:block;"></canvas>
+    </section>
+
+    <!-- Confiance superposée à l'hypnogramme -->
+    <section id="confidenceOverlaySection" data-tabs="analysis">
+        <h2>Hypnogramme + Confiance</h2>
+        <p>Hypnogramme avec la courbe de confiance superposée pour identifier les zones d'hésitation.</p>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap;">
+            <label style="color:var(--text-secondary);font-size:13px;">Seuil de confiance :</label>
+            <input type="range" id="overlayThresholdSlider" min="0" max="100" step="1" value="60" style="width:200px;">
+            <input type="number" id="overlayThresholdInput" min="0" max="100" step="1" value="60" style="width:60px;padding:4px 6px;border-radius:4px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-primary);font-size:13px;text-align:center;">
+            <span style="color:var(--text-secondary);font-size:13px;">%</span>
+        </div>
+        <canvas id="confidenceOverlayCanvas" width="1200" height="340" style="max-width:100%;display:block;"></canvas>
+    </section>
+
+    <!-- Diagramme circulaire / Sunburst -->
+    <section id="sunburstSection" data-tabs="analysis">
+        <h2>Distribution des stades (Sunburst)</h2>
+        <p>Diagramme circulaire : anneau interne = stades prédits, anneau externe = accord/désaccord par annotateur.</p>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;justify-content:center;">
+            <canvas id="sunburstCanvas" width="500" height="500" style="max-width:500px;"></canvas>
+            <canvas id="sunburstThreshCanvas" width="500" height="500" style="max-width:500px;"></canvas>
+        </div>
+    </section>
+
+    <!-- Timeline d'erreurs -->
+    <section id="errorTimelineSection" data-tabs="analysis">
+        <h2>Timeline d'erreurs</h2>
+        <p>Bande temporelle montrant les zones correctes (vert) et les erreurs (rouge) pour repérer les clusters.</p>
+        <canvas id="errorTimelineCanvas" width="1200" height="120" style="max-width:100%;display:block;"></canvas>
+    </section>
+
+    <!-- Matrice de confusion visuelle -->
+    <section id="confusionHeatmapSection" data-tabs="analysis">
+        <h2>Matrice de confusion (heatmap)</h2>
+        <canvas id="confusionHeatmapCanvas"></canvas>
+    </section>
+
+    <!-- Analyse des erreurs consécutives -->
+    <section id="errorBurstsSection" data-tabs="analysis">
+        <h2>Analyse des erreurs consécutives</h2>
+        <div style="display:flex;gap:12px;flex-wrap:nowrap;align-items:stretch;">
+            <div style="flex:1;min-width:0;">
+                <div class="stats-grid" id="errorBurstsGrid"></div>
+            </div>
+            <div style="flex:1;min-width:0;">
+                <canvas id="errorBurstsCanvas"></canvas>
+            </div>
+            <div style="flex:1;min-width:0;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:20px;font-size:13px;line-height:1.6;color:var(--text-secondary);box-sizing:border-box;">
+                <p style="margin:0 0 10px;"><strong style="color:var(--text-primary);">Qu'est-ce que cette analyse ?</strong></p>
+                <p style="margin:0 0 8px;">Détecte les <strong>séquences d'erreurs consécutives</strong> (bursts) : plusieurs epochs mal classées d'affilée.</p>
+                <p style="margin:0 0 10px;"><strong style="color:var(--text-primary);">Les indicateurs</strong></p>
+                <ul style="margin:0 0 8px;padding-left:18px;">
+                    <li><strong>Erreurs totales</strong> : nombre d'epochs incorrectes.</li>
+                    <li><strong>Séquences d'erreurs</strong> : groupes consécutifs.</li>
+                    <li><strong>Erreurs isolées</strong> : erreurs ponctuelles (1 epoch).</li>
+                    <li><strong>Séquences ≥ 5</strong> : longues séries, souvent liées aux transitions mal gérées.</li>
+                    <li><strong>Plus longue séq.</strong> : pire cas de confusion prolongée.</li>
+                </ul>
+                <p style="margin:0 0 10px;"><strong style="color:var(--text-primary);">L'histogramme</strong></p>
+                <p style="margin:0 0 8px;">Barres <span style="color:#3b82f6;">bleues</span> = courtes (&lt; 5), <span style="color:#ef4444;">rouges</span> = longues (≥ 5). Un bon modèle a surtout des erreurs isolées.</p>
+                <p style="margin:0;"><strong style="color:var(--text-primary);">Pourquoi c'est utile ?</strong></p>
+                <p style="margin:4px 0 0;">Erreurs isolées = bruit normal. Longues séquences = zones où le modèle décroche (confusion N1/N2, transitions).</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Profils / Presets -->
+    <section id="presetsSection" data-tabs="realtime analysis">
+        <h2>Profils / Presets</h2>
+        <p>Sauvegardez et restaurez vos configurations de seuils et filtres.</p>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
+            <input type="text" id="presetNameInput" placeholder="Nom du profil..." style="padding:6px 10px;border-radius:6px;border:1px solid #ccc;background:#f9f9f9;color:#111;font-size:13px;width:200px;">
+            <button id="presetSaveBtn" class="btn btn-small" style="background:#3b82f6;color:#fff;">Sauvegarder</button>
+            <button id="presetDeleteBtn" class="btn btn-small" style="background:#ef4444;color:#fff;">Supprimer</button>
+        </div>
+        <div id="presetsList" style="display:flex;gap:8px;flex-wrap:wrap;"></div>
+    </section>
+
+    <!-- Sauvegarde et rapport -->
+    <section id="reportSection" data-tabs="realtime">
+        <h2>Sauvegarde et rapport</h2>
+        <div class="control-group" style="flex-wrap:wrap; gap:8px;">
+            <button id="btnSaveSession"  class="btn btn-primary"   disabled>Sauvegarder session (.json)</button>
+            <button id="btnExportCSV"    class="btn btn-secondary" disabled>Exporter résultats (.csv)</button>
+            <button id="btnExportHypno"  class="btn btn-secondary" disabled>Exporter hypnogramme (.png)</button>
+        </div>
+        <div id="sessionInfo" style="display:none; margin-top:8px; padding:8px 12px;
+             background:#1e2530; border-radius:6px; font-size:13px; color:#9aa0a6;"></div>
+    </section>
+
+    <!-- Configuration du format de fichier -->
+    <section id="configSection" data-tabs="realtime">
+        <h2>Configuration du fichier</h2>
+        <p class="config-note">
+            Cette section est à adapter selon le format de votre fichier de données.
+            Actuellement, le parseur attend un fichier avec une valeur EOG brute par ligne.
+            Les annotations sont optionnelles et à configurer dans le code (app.js).
+        </p>
+        <div class="config-grid">
+            <div>
+                <label>Colonne EOG (0-indexed):</label>
+                <input type="number" id="cfgEogCol" value="1" min="0">
+            </div>
+            <div>
+                <label>Colonne Annotateur 1:</label>
+                <input type="number" id="cfgAnnot1Col" value="2" min="-1">
+                <small>(-1 = pas de colonne)</small>
+            </div>
+            <div>
+                <label>Colonne Annotateur 2:</label>
+                <input type="number" id="cfgAnnot2Col" value="3" min="-1">
+                <small>(-1 = pas de colonne)</small>
+            </div>
+            <div>
+                <label>Séparateur :</label>
+                <select id="cfgSeparator">
+                    <option value="auto">Auto-detect</option>
+                    <option value="\t" selected>Tabulation</option>
+                    <option value=",">Virgule</option>
+                    <option value=";">Point-virgule</option>
+                    <option value=" ">Espace</option>
+                </select>
+            </div>
+            <div>
+                <label>Lignes d'en-tête à ignorer :</label>
+                <input type="number" id="cfgSkipLines" value="1" min="0">
+            </div>
+            <div>
+                <label>Annotations par:</label>
+                <select id="cfgAnnotPer">
+                    <option value="epoch">Epoch (1 par 30s)</option>
+                    <option value="sample" selected>Échantillon (1 par valeur)</option>
+                </select>
+            </div>
+        </div>
+    </section>
+
+    <!-- Console de log -->
+    <section id="logSection" data-tabs="realtime">
+        <h2>Console <button id="btnClearLog" class="btn btn-small">Effacer</button></h2>
+        <div id="logConsole"></div>
+    </section>
+
+    </div><!-- fin mainSections -->
+
+    <!-- ================================================================== -->
+    <!-- TAB 3: Analyse multi-fichiers                                      -->
+    <!-- ================================================================== -->
+    <div id="tabMultifile" class="tab-content">
+
+    <!-- Bandeau dossier commun (sticky) -->
+    <div id="mfFolderBanner" class="mf-folder-banner" style="display:none;">
+        <span class="mf-folder-icon">&#128193;</span>
+        <span id="mfFolderName"></span>
+    </div>
+
+    <!-- 1. Chargement des sessions -->
+    <section id="mfLoaderSection">
+        <h2>Chargement des sessions</h2>
+        <div class="control-group" style="flex-wrap:wrap; gap:8px;">
+            <label class="btn btn-primary file-label">
+                Charger des sessions (.json)
+                <input type="file" id="mfFileInput" accept=".json" multiple hidden>
+            </label>
+            <label class="btn btn-secondary file-label">
+                Charger un dossier
+                <input type="file" id="mfFolderInput" accept=".json" webkitdirectory hidden>
+            </label>
+            <button id="mfClearFiles" class="btn btn-danger" disabled>Tout supprimer</button>
+            <span id="mfFileCount" class="file-info">Aucun fichier chargé</span>
+        </div>
+        <div id="mfFileList" class="mf-file-list"></div>
+    </section>
+
+    <!-- 2. Accord inter-annotateurs -->
+    <section id="mfKappaSection" style="display:none;">
+        <h2>Accord inter-annotateurs</h2>
+        <div class="stats-grid" id="mfKappaGrid"></div>
+    </section>
+
+    <!-- 2. Statistiques agrégées -->
+    <section id="mfStatsSection" style="display:none;">
+        <h2>Statistiques agrégées</h2>
+        <div class="stats-filter-bar">
+            <label for="mfStatsFilterSelect">Filtre:</label>
+            <select id="mfStatsFilterSelect">
+                <option value="all">Tous (aucun filtre)</option>
+                <option value="a1_vs_ia">Annoteur 1 vs IA</option>
+                <option value="a2_vs_ia">Annoteur 2 vs IA</option>
+                <option value="a1_eq_a2">Annoteurs unanimes vs IA</option>
+                <option value="a1_ne_a2">Annoteurs en désaccord</option>
+                <option value="ia_ok_a1">IA correcte (vs Annot. 1)</option>
+                <option value="ia_ko_a1">IA incorrecte (vs Annot. 1)</option>
+                <option value="ia_ok_a2">IA correcte (vs Annot. 2)</option>
+                <option value="ia_ko_a2">IA incorrecte (vs Annot. 2)</option>
+                <option value="ia_consensus">IA = consensus annoteurs</option>
+                <option value="ia_no_consensus">IA != consensus annoteurs</option>
+                <option value="all_disagree">Aucun accord (3 différents)</option>
+            </select>
+            <span id="mfStatsFilterInfo" class="stats-filter-info"></span>
+        </div>
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Fichiers chargés</div>
+                <div class="stat-value" id="mfStatFiles">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Epochs totales</div>
+                <div class="stat-value" id="mfStatEpochs">0</div>
+                <div class="stat-duration" id="mfStatEpochsDuration"></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Précision moy. A1</div>
+                <div class="stat-value" id="mfStatAccA1">--</div>
+                <div class="stat-duration" id="mfStatAccA1Range"></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Précision moy. A2</div>
+                <div class="stat-value" id="mfStatAccA2">--</div>
+                <div class="stat-duration" id="mfStatAccA2Range"></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Confiance moyenne</div>
+                <div class="stat-value" id="mfStatAvgConf">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Temps moyen (ms)</div>
+                <div class="stat-value" id="mfStatAvgTime">--</div>
+            </div>
+        </div>
+
+        <!-- Distribution moyenne -->
+        <div id="mfDistributionSection" style="margin-top:16px;">
+            <h3>Distribution moyenne des stades</h3>
+            <div class="stats-grid" id="mfDistributionGrid"></div>
+        </div>
+
+        <!-- Filtre par confiance -->
+        <div id="mfConfidenceSection" style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border);">
+            <h3>Statistiques par seuil de confiance</h3>
+            <div class="confidence-control">
+                <label for="mfConfidenceSlider">Seuil:</label>
+                <input type="range" id="mfConfidenceSlider" min="0" max="100" step="1" value="60">
+                <input type="number" id="mfConfidenceInput" min="0" max="100" step="1" value="60" class="confidence-number">
+                <span class="confidence-pct">%</span>
+                <span id="mfFilteredCountLabel" class="filtered-count-label"></span>
+            </div>
+            <div class="stats-grid" id="mfFilteredStatsGrid"></div>
+            <div class="stats-grid" id="mfFilteredDistributionGrid" style="margin-top:12px;"></div>
+        </div>
+    </section>
+
+    <!-- 3. Métriques par stade -->
+    <section id="mfMetricsSection" style="display:none;">
+        <h2>Métriques par stade (vs Annoteur 1)</h2>
+        <div class="table-container">
+            <table id="mfMetricsTable">
+                <thead>
+                    <tr>
+                        <th>Stade</th>
+                        <th>Précision</th>
+                        <th>Recall</th>
+                        <th>F1-Score</th>
+                        <th>Support</th>
+                    </tr>
+                </thead>
+                <tbody id="mfMetricsBody"></tbody>
+            </table>
+        </div>
+
+        <h3 style="margin-top:16px;">Matrice de confusion (IA vs Annoteur 1)</h3>
+        <div id="mfConfusionContainer"></div>
+    </section>
+
+    <!-- 5. Résumé par fichier -->
+    <section id="mfSummarySection" style="display:none;">
+        <h2>Résumé par fichier</h2>
+        <div class="mf-summary-toolbar">
+            <label>Trier par:</label>
+            <select id="mfSortSelect">
+                <option value="name">Nom</option>
+                <option value="epochs">Nombre d'epochs</option>
+                <option value="accA1">Précision A1</option>
+                <option value="accA2">Précision A2</option>
+                <option value="avgConf">Confiance moyenne</option>
+                <option value="kappaA1">Kappa A1</option>
+            </select>
+            <button id="mfExportSummary" class="btn btn-secondary btn-small">Exporter résumé (.csv)</button>
+        </div>
+        <div class="table-container" style="max-height:400px;">
+            <table id="mfSummaryTable">
+                <thead>
+                    <tr>
+                        <th>Fichier</th>
+                        <th>Epochs</th>
+                        <th>Précision A1</th>
+                        <th>Précision A2</th>
+                        <th>Confiance moy.</th>
+                        <th>Kappa A1</th>
+                        <th>Temps moy. (ms)</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="mfSummaryBody"></tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- 5b. Statistiques du fichier sélectionné -->
+    <section id="mfFileStatsSection" style="display:none;">
+        <h2>Statistiques du fichier - <span id="mfFileStatsName">--</span></h2>
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Epochs traitées</div>
+                <div class="stat-value" id="mffsStatEpochs">0</div>
+                <div class="stat-duration" id="mffsStatEpochsDuration"></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Précision vs Annot. 1</div>
+                <div class="stat-value" id="mffsStatAccA1">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Précision vs Annot. 2</div>
+                <div class="stat-value" id="mffsStatAccA2">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Temps moyen (ms)</div>
+                <div class="stat-value" id="mffsStatAvgTime">--</div>
+            </div>
+        </div>
+        <!-- Distribution des prédictions -->
+        <div id="mffsConfusionSection" style="margin-top:16px;">
+            <h3>Distribution des prédictions</h3>
+            <div class="stats-grid" id="mffsDistributionGrid"></div>
+        </div>
+        <!-- Statistiques par seuil de confiance -->
+        <div id="mffsConfidenceSection" style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border);">
+            <h3>Statistiques par seuil de confiance</h3>
+            <div class="confidence-control">
+                <label for="mffsConfidenceSlider">Seuil:</label>
+                <input type="range" id="mffsConfidenceSlider" min="0" max="100" step="1" value="60">
+                <input type="number" id="mffsConfidenceInput" min="0" max="100" step="1" value="60" class="confidence-number">
+                <span class="confidence-pct">%</span>
+                <span id="mffsFilteredCountLabel" class="filtered-count-label"></span>
+            </div>
+            <div class="stats-grid" id="mffsFilteredStatsGrid">
+                <div class="stat-card">
+                    <div class="stat-label">Epochs filtrées</div>
+                    <div class="stat-value" id="mffsFilteredEpochs">0 / 0</div>
+                    <div class="stat-duration" id="mffsFilteredEpochsDuration"></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Précision vs Annot. 1</div>
+                    <div class="stat-value" id="mffsFilteredAccA1">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Précision vs Annot. 2</div>
+                    <div class="stat-value" id="mffsFilteredAccA2">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Temps moyen (ms)</div>
+                    <div class="stat-value" id="mffsFilteredAvgTime">--</div>
+                </div>
+            </div>
+            <div class="stats-grid" id="mffsFilteredDistributionGrid" style="margin-top:8px;"></div>
+        </div>
+    </section>
+
+    <!-- 6. Hypnogrammes empilés -->
+    <section id="mfHypnoSection" style="display:none;">
+        <h2>Hypnogrammes</h2>
+        <div class="mf-hypno-toolbar">
+            <div class="control-group">
+                <label for="mfHypnoSearch">Rechercher:</label>
+                <input type="text" id="mfHypnoSearch" placeholder="Nom du fichier..."
+                       style="min-width:200px;">
+            </div>
+            <div class="control-group">
+                <label for="mfHypnoSelect">Fichiers affichés :</label>
+                <select id="mfHypnoSelect" multiple size="4" style="min-width:280px;"></select>
+            </div>
+            <div class="control-group">
+                <label for="mfHypnoCount">Nombre max:</label>
+                <input type="number" id="mfHypnoCount" value="5" min="1" max="20" style="width:60px;">
+            </div>
+            <div class="hypno-visibility">
+                <label><input type="checkbox" id="mfHypnoShowNeuralix" checked> <span style="color:#3b82f6">Neuralix</span></label>
+                <label><input type="checkbox" id="mfHypnoShowA1" checked> <span style="color:#ef4444">Annot. 1</span></label>
+                <label><input type="checkbox" id="mfHypnoShowA2" checked> <span style="color:#22c55e">Annot. 2</span></label>
+            </div>
+        </div>
+        <div class="hypnogram-legend" style="margin-bottom:12px;">
+            <span class="legend-item stage-W">Wake</span>
+            <span class="legend-item stage-N1">N1</span>
+            <span class="legend-item stage-N2">N2</span>
+            <span class="legend-item stage-N3">N3</span>
+            <span class="legend-item stage-REM">REM</span>
+        </div>
+        <div id="mfHypnoContainer"></div>
+    </section>
+
+    <!-- 7. Historique pour le fichier sélectionné -->
+    <section id="mfHistorySection" style="display:none;">
+        <h2>Historique - <span id="mfHistoryFileName">--</span></h2>
+        <div class="history-legend">
+            <span class="legend-color lg-agree"></span> Unanime (3/3)
+            <span class="legend-color lg-partial"></span> Accord partiel (2/3)
+            <span class="legend-color lg-outlier"></span> Divergent
+            <span class="legend-color lg-wrong"></span> Aucun accord ESP32
+        </div>
+        <div class="table-container">
+            <table id="mfHistoryTable">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Temps</th>
+                        <th>ESP32</th>
+                        <th>Annot. 1</th>
+                        <th>Annot. 2</th>
+                        <th>Confiance</th>
+                        <th>Temps (ms)</th>
+                    </tr>
+                </thead>
+                <tbody id="mfHistoryBody"></tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- 8. Durées des stades par fichier -->
+    <section id="mfDurationSection" style="display:none;">
+        <h2>Durée des stades par fichier</h2>
+        <div class="table-container" style="max-height:500px;">
+            <table id="mfDurationTable">
+                <thead>
+                    <tr>
+                        <th>Fichier</th>
+                        <th>Wake</th>
+                        <th>N1</th>
+                        <th>N2</th>
+                        <th>N3</th>
+                        <th>REM</th>
+                        <th>Total</th>
+                    </tr>
+                </thead>
+                <tbody id="mfDurationBody"></tbody>
+            </table>
+        </div>
+        <div style="margin-top:12px;">
+            <h3>Résumé des durées (min / moy / max en minutes)</h3>
+            <div class="stats-grid" id="mfDurationStatsGrid"></div>
+        </div>
+    </section>
+
+    <!-- 9. Export -->
+    <section id="mfExportSection" style="display:none;">
+        <h2>Export</h2>
+        <div class="control-group" style="flex-wrap:wrap; gap:8px;">
+            <button id="mfExportAllCSV" class="btn btn-secondary">Exporter toutes les prédictions (.csv)</button>
+            <button id="mfExportStatsCSV" class="btn btn-secondary">Exporter résumé statistique (.csv)</button>
+            <button id="mfExportHypnosPNG" class="btn btn-secondary">Exporter hypnogrammes (.png)</button>
+        </div>
+    </section>
+
+    <!-- Calibration multi-fichier -->
+    <section id="mfCalibrationSection" style="display:none;">
+        <h2>Courbe de calibration (tous fichiers)</h2>
+        <canvas id="mfCalibrationCanvas"></canvas>
+    </section>
+
+    <!-- Bland-Altman multi-fichier -->
+    <section id="mfBlandAltmanSection" style="display:none;">
+        <h2>Bland-Altman (tous fichiers)</h2>
+        <canvas id="mfBlandAltmanCanvas"></canvas>
+    </section>
+
+    <!-- ICC multi-fichier -->
+    <section id="mfIccSection" style="display:none;">
+        <h2>ICC — Corrélation intra-classe (tous fichiers)</h2>
+        <div class="stats-grid" id="mfIccGrid"></div>
+    </section>
+
+    <!-- Heatmap multi-fichier -->
+    <section id="mfHeatmapSection" style="display:none;">
+        <h2>Heatmap temporelle (par fichier)</h2>
+        <canvas id="mfHeatmapCanvas"></canvas>
+    </section>
+
+    <!-- Sunburst multi-fichier -->
+    <section id="mfSunburstSection" style="display:none;">
+        <h2>Sunburst (tous fichiers)</h2>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;justify-content:center;">
+            <canvas id="mfSunburstCanvas"></canvas>
+            <canvas id="mfSunburstThreshCanvas"></canvas>
+        </div>
+    </section>
+
+    <!-- Error timeline multi-fichier -->
+    <section id="mfErrorTimelineSection" style="display:none;">
+        <h2>Timeline d'erreurs (par fichier)</h2>
+        <canvas id="mfErrorTimelineCanvas"></canvas>
+    </section>
+
+    <!-- Dashboard multi-fichier -->
+    <section id="mfDashboardSection" style="display:none;">
+        <h2>Dashboard</h2>
+        <div class="stats-grid" id="mfDashboardGrid"></div>
+    </section>
+
+    <!-- Matrice confusion heatmap multi-fichier -->
+    <section id="mfConfusionHeatmapSection" style="display:none;">
+        <h2>Matrice de confusion (tous fichiers)</h2>
+        <canvas id="mfConfusionHeatmapCanvas"></canvas>
+    </section>
+
+    <!-- Error bursts multi-fichier -->
+    <section id="mfErrorBurstsSection" style="display:none;">
+        <h2>Erreurs consécutives (tous fichiers)</h2>
+        <div style="display:flex;gap:12px;flex-wrap:nowrap;align-items:stretch;">
+            <div style="flex:1;min-width:0;">
+                <div class="stats-grid" id="mfErrorBurstsGrid"></div>
+            </div>
+            <div style="flex:1;min-width:0;">
+                <canvas id="mfErrorBurstsCanvas"></canvas>
+            </div>
+            <div style="flex:1;min-width:0;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:20px;font-size:13px;line-height:1.6;color:var(--text-secondary);box-sizing:border-box;">
+                <p style="margin:0 0 10px;"><strong style="color:var(--text-primary);">Qu'est-ce que cette analyse ?</strong></p>
+                <p style="margin:0 0 8px;">Détecte les <strong>séquences d'erreurs consécutives</strong> (bursts) : plusieurs epochs mal classées d'affilée.</p>
+                <p style="margin:0 0 10px;"><strong style="color:var(--text-primary);">Les indicateurs</strong></p>
+                <ul style="margin:0 0 8px;padding-left:18px;">
+                    <li><strong>Erreurs totales</strong> : nombre d'epochs incorrectes.</li>
+                    <li><strong>Séquences d'erreurs</strong> : groupes consécutifs.</li>
+                    <li><strong>Erreurs isolées</strong> : erreurs ponctuelles (1 epoch).</li>
+                    <li><strong>Séquences ≥ 5</strong> : longues séries, souvent liées aux transitions mal gérées.</li>
+                    <li><strong>Plus longue séq.</strong> : pire cas de confusion prolongée.</li>
+                </ul>
+                <p style="margin:0 0 10px;"><strong style="color:var(--text-primary);">L'histogramme</strong></p>
+                <p style="margin:0 0 8px;">Barres <span style="color:#3b82f6;">bleues</span> = courtes (&lt; 5), <span style="color:#ef4444;">rouges</span> = longues (≥ 5). Un bon modèle a surtout des erreurs isolées.</p>
+                <p style="margin:0;"><strong style="color:var(--text-primary);">Pourquoi c'est utile ?</strong></p>
+                <p style="margin:4px 0 0;">Erreurs isolées = bruit normal. Longues séquences = zones où le modèle décroche (confusion N1/N2, transitions).</p>
+            </div>
+        </div>
+    </section>
+
+    </div><!-- fin tabMultifile -->
+
+    <!-- ================================================================== -->
+    <!-- Onglet Comparatif algos                                            -->
+    <!-- ================================================================== -->
+    <div id="tabComparative" class="tab-content">
+
+    <!-- Chargement des 2 algos -->
+    <section id="cmpLoaderSection">
+        <h2>Chargement des algorithmes</h2>
+        <div class="cmp-loader-dual">
+            <div class="cmp-loader-side" data-side="A">
+                <h3 id="cmpLoaderTitleA">Algorithme A</h3>
+                <label class="cmp-algo-name-label">Nom : <input type="text" id="cmpAlgoNameA" class="cmp-algo-name" placeholder="Algo A" value="Algo A"></label>
+                <div class="control-group">
+                    <input type="file" id="cmpFolderA" webkitdirectory multiple hidden>
+                    <button class="btn btn-primary" onclick="document.getElementById('cmpFolderA').click()">Charger dossier A</button>
+                    <span id="cmpCountA" class="text-muted">0 fichiers</span>
+                </div>
+            </div>
+            <div class="cmp-loader-side" data-side="B">
+                <h3 id="cmpLoaderTitleB">Algorithme B</h3>
+                <label class="cmp-algo-name-label">Nom : <input type="text" id="cmpAlgoNameB" class="cmp-algo-name" placeholder="Algo B" value="Algo B"></label>
+                <div class="control-group">
+                    <input type="file" id="cmpFolderB" webkitdirectory multiple hidden>
+                    <button class="btn btn-primary" onclick="document.getElementById('cmpFolderB').click()">Charger dossier B</button>
+                    <span id="cmpCountB" class="text-muted">0 fichiers</span>
+                </div>
+            </div>
+        </div>
+        <div class="control-group" style="margin-top:8px;">
+            <button id="cmpClearBtn" class="btn btn-danger btn-sm">Tout effacer</button>
+        </div>
+    </section>
+
+    <!-- Seuil de confiance -->
+    <section id="cmpConfSection" style="display:none;">
+        <h2>Seuil de confiance</h2>
+        <div class="cmp-conf-bar">
+            <label>Seuil global : <input type="range" id="cmpConfSlider" min="0" max="100" step="1" value="60">
+                <span id="cmpConfValue">60%</span></label>
+            <button id="cmpConfModeBtn" class="btn btn-sm btn-secondary">Mode : Commun</button>
+        </div>
+        <div id="cmpConfIndividual" style="display:none;" class="cmp-conf-individual">
+            <div class="cmp-conf-side">
+                <label><span id="cmpConfLabelA">Algo A</span> : <input type="range" id="cmpConfSliderA" min="0" max="100" step="1" value="60">
+                    <span id="cmpConfValueA">60%</span></label>
+            </div>
+            <div class="cmp-conf-side">
+                <label><span id="cmpConfLabelB">Algo B</span> : <input type="range" id="cmpConfSliderB" min="0" max="100" step="1" value="60">
+                    <span id="cmpConfValueB">60%</span></label>
+            </div>
+        </div>
+    </section>
+
+    <!-- Stats globales -->
+    <section id="cmpGlobalSection" style="display:none;">
+        <h2>Statistiques globales</h2>
+        <div class="cmp-dual" id="cmpGlobalDual">
+            <!-- Rempli par comparative.js -->
+        </div>
+    </section>
+
+    <!-- Distribution par stade -->
+    <section id="cmpDistribSection" style="display:none;">
+        <h2>Distribution par stade</h2>
+        <div class="cmp-dual" id="cmpDistribDual">
+        </div>
+    </section>
+
+    <!-- Precision par stade -->
+    <section id="cmpPerStageSection" style="display:none;">
+        <h2>Précision par stade</h2>
+        <div class="cmp-dual" id="cmpPerStageDual">
+        </div>
+    </section>
+
+    <!-- Metriques (Precision/Recall/F1) -->
+    <section id="cmpMetricsSection" style="display:none;">
+        <h2>Métriques par stade</h2>
+        <div class="cmp-dual" id="cmpMetricsDual">
+        </div>
+    </section>
+
+    <!-- Matrice de confusion -->
+    <section id="cmpConfusionSection" style="display:none;">
+        <h2>Matrices de confusion</h2>
+        <div class="cmp-dual" id="cmpConfusionDual">
+        </div>
+    </section>
+
+    <!-- Kappa -->
+    <section id="cmpKappaSection" style="display:none;">
+        <h2>Accord inter-annotateurs (Kappa)</h2>
+        <div class="cmp-kappa-legend" id="cmpKappaLegend">
+            <span style="color:#22c55e">&#x25CF; Excellent (&ge; 0.81)</span>
+            <span style="color:#3b82f6">&#x25CF; Bon (0.61 - 0.80)</span>
+            <span style="color:#fbbf24">&#x25CF; Mod&#xe9;r&#xe9; (0.41 - 0.60)</span>
+            <span style="color:#f97316">&#x25CF; Faible (0.21 - 0.40)</span>
+            <span style="color:#ef4444">&#x25CF; Tr&#xe8;s faible (&lt; 0.21)</span>
+        </div>
+        <div class="cmp-dual" id="cmpKappaDual">
+        </div>
+    </section>
+
+    </div><!-- fin tabComparative -->
+
+    <script src="sections.js"></script>
+    <script src="sidebar.js"></script>
+    <script src="app.js"></script>
+    <script src="multifile.js"></script>
+    <script src="comparative.js"></script>
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('./sw.js').then((reg) => {
+                reg.addEventListener('updatefound', () => {
+                    const newSW = reg.installing;
+                    newSW.addEventListener('statechange', () => {
+                        if (newSW.state === 'activated') {
+                            // Nouvelle version dispo : recharger silencieusement
+                            window.location.reload();
+                        }
+                    });
+                });
+            });
+        }
+    </script>
+</body>
+</html>

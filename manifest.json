@@ -1,0 +1,17 @@
+{
+  "name": "Neuralix Web Tester",
+  "short_name": "Neuralix",
+  "description": "Sleep Stage Classifier - ESP32-S3",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#1a1d23",
+  "theme_color": "#3b82f6",
+  "icons": [
+    {
+      "src": "icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
