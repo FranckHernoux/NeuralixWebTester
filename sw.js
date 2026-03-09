@@ -5,7 +5,7 @@
  * À chaque nouvelle version, incrémente CACHE_VERSION pour forcer le refresh.
  */
 
-const CACHE_VERSION = 'neuralix-v1';
+const CACHE_VERSION = 'neuralix-v2';
 
 const FILES_TO_CACHE = [
     './',
@@ -17,7 +17,9 @@ const FILES_TO_CACHE = [
     './sections.js',
     './comparative.js',
     './compute-worker.js',
-    './manifest.json'
+    './manifest.json',
+    './icons/icon-192.png',
+    './icons/icon-512.png'
 ];
 
 // Install : pré-cache tous les fichiers
