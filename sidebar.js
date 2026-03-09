@@ -83,7 +83,8 @@
             { id: 'cmpPerStageSection',  icon: '\uD83C\uDFAF', label: 'Pr\u00e9cision par stade', requiresData: true },
             { id: 'cmpMetricsSection',   icon: '\uD83D\uDCCF', label: 'M\u00e9triques (P/R/F1)',  requiresData: true },
             { id: 'cmpConfusionSection', icon: '\uD83D\uDD22', label: 'Matrices confusion',   requiresData: true },
-            { id: 'cmpKappaSection',     icon: '\uD83E\uDD1D', label: 'Accord Kappa',         requiresData: true }
+            { id: 'cmpKappaSection',     icon: '\uD83E\uDD1D', label: 'Accord Kappa',         requiresData: true },
+            { id: 'cmpSynthesisSection', icon: '\uD83C\uDFC6', label: 'Evaluation / Synth\u00e8se', requiresData: true }
         ]
     };
 

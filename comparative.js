@@ -172,7 +172,8 @@ async function cmpLoadFolder(side, fileList) {
 function cmpShowSections() {
     const has = cmpState.sidesData.A.length > 0 && cmpState.sidesData.B.length > 0;
     const ids = ['cmpConfSection', 'cmpGlobalSection', 'cmpDistribSection',
-                 'cmpPerStageSection', 'cmpMetricsSection', 'cmpConfusionSection', 'cmpKappaSection'];
+                 'cmpPerStageSection', 'cmpMetricsSection', 'cmpConfusionSection', 'cmpKappaSection',
+                 'cmpSynthesisSection'];
     for (const id of ids) {
         const el = document.getElementById(id);
         if (el) el.style.display = has ? '' : 'none';
@@ -507,6 +508,7 @@ function cmpRefreshAll() {
     cmpRenderMetrics(sA, sB, nameA, nameB);
     cmpRenderConfusion(sA, sB, nameA, nameB);
     cmpRenderKappa(sA, sB, nameA, nameB);
+    cmpRenderSynthesis(sA, sB, nameA, nameB, thA, thB);
 }
 
 // ---- Global stats ----
@@ -543,9 +545,7 @@ function cmpRenderGlobal(sA, sB, nameA, nameB) {
                 cmpDiffBadge(s.accA2, other.accA2, true, true, 0.15) + rangeHtml(s.accA2Range),
                 cmpDiffStyle(s.accA2, other.accA2, true, 0.15)) +
             cmpStatCard('Confiance moy.', (s.avgConfidence * 100).toFixed(1) + '%', '') +
-            cmpStatCard('Temps moy.', s.avgTimeMs.toFixed(0) + ' ms',
-                cmpDiffBadge(s.avgTimeMs, other.avgTimeMs, false, false, 50),
-                cmpDiffStyle(s.avgTimeMs, other.avgTimeMs, false, 50)) +
+            cmpStatCard('Temps moy.', s.avgTimeMs.toFixed(0) + ' ms', '') +
             '</div></div>';
     }
     el.innerHTML = side(sA, sB, nameA) + '<div class="cmp-divider"></div>' + side(sB, sA, nameB);
@@ -728,6 +728,631 @@ function cmpRenderKappa(sA, sB, nameA, nameB) {
 }
 
 // ============================================================================
+// Evaluation et Synthese
+// ============================================================================
+
+function cmpRenderSynthesis(sA, sB, nameA, nameB, thA, thB) {
+    const el = document.getElementById('cmpSynthesisContent');
+    if (!el) return;
+  try {
+    // --- Scoring system ---
+    // Each criterion gives a score from -1 (B much better) to +1 (A much better)
+    // Weight reflects importance
+    const criteria = [];
+
+    // 0. Précision par stade (critère dominant) — chaque stade pèse de façon égale
+    // Capture les gros écarts stade par stade (ex: +36% N1, +65% N2)
+    {
+        let sumA = 0, sumB = 0, nStages = 0;
+        const stageList = (typeof STAGE_NAMES !== 'undefined' ? STAGE_NAMES : ['Wake','N1','N2','N3','REM']);
+        for (const stage of stageList) {
+            const precA = sA.perStageAccA1[stage];
+            const precB = sB.perStageAccA1[stage];
+            if (precA != null && precB != null) {
+                sumA += precA; sumB += precB; nStages++;
+            }
+        }
+        if (nStages > 0) {
+            const avgA = sumA / nStages;
+            const avgB = sumB / nStages;
+            const diff = avgA - avgB;
+            criteria.push({
+                name: 'Pr\u00e9cision par stade (vs A1)',
+                weight: 5,
+                score: Math.max(-1, Math.min(1, diff / 0.10)),
+                valA: (avgA * 100).toFixed(1) + '% (moy. ' + nStages + ' stades)',
+                valB: (avgB * 100).toFixed(1) + '% (moy. ' + nStages + ' stades)',
+                diff: diff,
+                higherBetter: true
+            });
+        }
+    }
+
+    // 1. Global accuracy vs A1
+    if (sA.accA1 != null && sB.accA1 != null) {
+        const diff = sA.accA1 - sB.accA1;
+        criteria.push({
+            name: 'Pr\u00e9cision globale (vs A1)',
+            weight: 3,
+            score: Math.max(-1, Math.min(1, diff / 0.10)),
+            valA: (sA.accA1 * 100).toFixed(1) + '%',
+            valB: (sB.accA1 * 100).toFixed(1) + '%',
+            diff: diff,
+            higherBetter: true
+        });
+    }
+
+    // 2. Global accuracy vs A2
+    if (sA.accA2 != null && sB.accA2 != null) {
+        const diff = sA.accA2 - sB.accA2;
+        criteria.push({
+            name: 'Pr\u00e9cision globale (vs A2)',
+            weight: 2,
+            score: Math.max(-1, Math.min(1, diff / 0.10)),
+            valA: (sA.accA2 * 100).toFixed(1) + '%',
+            valB: (sB.accA2 * 100).toFixed(1) + '%',
+            diff: diff,
+            higherBetter: true
+        });
+    }
+
+    // 3. Kappa IA vs A1
+    if (sA.kappaIA_A1 != null && sB.kappaIA_A1 != null) {
+        const diff = sA.kappaIA_A1 - sB.kappaIA_A1;
+        criteria.push({
+            name: 'Kappa (IA vs A1)',
+            weight: 3,
+            score: Math.max(-1, Math.min(1, diff / 0.10)),
+            valA: sA.kappaIA_A1.toFixed(3),
+            valB: sB.kappaIA_A1.toFixed(3),
+            diff: diff,
+            higherBetter: true
+        });
+    }
+
+    // 4. Kappa IA vs A2
+    if (sA.kappaIA_A2 != null && sB.kappaIA_A2 != null) {
+        const diff = sA.kappaIA_A2 - sB.kappaIA_A2;
+        criteria.push({
+            name: 'Kappa (IA vs A2)',
+            weight: 2,
+            score: Math.max(-1, Math.min(1, diff / 0.10)),
+            valA: sA.kappaIA_A2.toFixed(3),
+            valB: sB.kappaIA_A2.toFixed(3),
+            diff: diff,
+            higherBetter: true
+        });
+    }
+
+    // 5. Weighted F1 score (pondéré par le support = nb d'epochs par stade)
+    const stagesWithMetrics = (typeof STAGE_NAMES !== 'undefined' ? STAGE_NAMES : ['Wake','N1','N2','N3','REM']);
+    let wf1SumA = 0, wf1SumB = 0, supportSumA = 0, supportSumB = 0;
+    for (const stage of stagesWithMetrics) {
+        const mA = sA.metrics[stage];
+        const mB = sB.metrics[stage];
+        if (mA && mA.f1 != null && mA.support > 0) {
+            wf1SumA += mA.f1 * mA.support;
+            supportSumA += mA.support;
+        }
+        if (mB && mB.f1 != null && mB.support > 0) {
+            wf1SumB += mB.f1 * mB.support;
+            supportSumB += mB.support;
+        }
+    }
+    if (supportSumA > 0 && supportSumB > 0) {
+        const wAvgF1A = wf1SumA / supportSumA;
+        const wAvgF1B = wf1SumB / supportSumB;
+        const diff = wAvgF1A - wAvgF1B;
+        criteria.push({
+            name: 'F1 pond\u00e9r\u00e9 (par nb epochs)',
+            weight: 3,
+            score: Math.max(-1, Math.min(1, diff / 0.10)),
+            valA: (wAvgF1A * 100).toFixed(1) + '%',
+            valB: (wAvgF1B * 100).toFixed(1) + '%',
+            diff: diff,
+            higherBetter: true
+        });
+    }
+
+    // 6. Per-stage F1 balance (pire stade, pondéré par volume — un stade à 1 epoch ne compte presque pas)
+    let worstWeightedA = 1, worstWeightedB = 1;
+    const minSupportForWorst = 10; // ignorer les stades avec trop peu d'epochs
+    for (const stage of stagesWithMetrics) {
+        const mA = sA.metrics[stage];
+        const mB = sB.metrics[stage];
+        if (mA && mA.f1 != null && mA.support >= minSupportForWorst) worstWeightedA = Math.min(worstWeightedA, mA.f1);
+        if (mB && mB.f1 != null && mB.support >= minSupportForWorst) worstWeightedB = Math.min(worstWeightedB, mB.f1);
+    }
+    if (worstWeightedA < 1 || worstWeightedB < 1) {
+        const diff = worstWeightedA - worstWeightedB;
+        criteria.push({
+            name: 'F1 pire stade (robustesse)',
+            weight: 2,
+            score: Math.max(-1, Math.min(1, diff / 0.15)),
+            valA: (worstWeightedA * 100).toFixed(1) + '%',
+            valB: (worstWeightedB * 100).toFixed(1) + '%',
+            diff: diff,
+            higherBetter: true
+        });
+    }
+
+    // 6b. Rappel effectif par stade (recall pondéré × rétention)
+    // Pour chaque stade : TP/(TP+FN) pondéré par le nb réel d'epochs du stade
+    // Multiplié par la rétention : les epochs sous le seuil comptent comme ratées
+    // Un algo qui retrouve 267/300 epochs réelles score mieux que celui qui en retrouve 2/2
+    function computeEffectiveRecall(s) {
+        let rSum = 0, rSup = 0;
+        for (const stage of stagesWithMetrics) {
+            const m = s.metrics[stage];
+            if (m && m.recall != null && m.support > 0) { rSum += m.recall * m.support; rSup += m.support; }
+        }
+        if (rSup === 0) return 0;
+        const ret = s.totalEpochsRaw > 0 ? s.totalEpochs / s.totalEpochsRaw : 1;
+        return (rSum / rSup) * ret;
+    }
+    const erA = computeEffectiveRecall(sA);
+    const erB = computeEffectiveRecall(sB);
+    if (erA > 0 || erB > 0) {
+        const diff = erA - erB;
+        criteria.push({
+            name: 'Rappel effectif (par stade)',
+            weight: 3,
+            score: Math.max(-1, Math.min(1, diff / 0.10)),
+            valA: (erA * 100).toFixed(1) + '% (' + sA.totalEpochs + '/' + sA.totalEpochsRaw + ' epochs)',
+            valB: (erB * 100).toFixed(1) + '% (' + sB.totalEpochs + '/' + sB.totalEpochsRaw + ' epochs)',
+            diff: diff,
+            higherBetter: true
+        });
+    }
+
+    // 7. Data volume (epochs after filtering) — bonus for algo that retains more data
+    if (sA.totalEpochs > 0 && sB.totalEpochs > 0) {
+        const ratioA = sA.totalEpochsRaw > 0 ? sA.totalEpochs / sA.totalEpochsRaw : 1;
+        const ratioB = sB.totalEpochsRaw > 0 ? sB.totalEpochs / sB.totalEpochsRaw : 1;
+        const diff = ratioA - ratioB;
+        criteria.push({
+            name: 'Donn\u00e9es au-dessus du seuil',
+            weight: 2,
+            score: Math.max(-1, Math.min(1, diff / 0.20)),
+            valA: (ratioA * 100).toFixed(1) + '% (' + sA.totalEpochs + '/' + sA.totalEpochsRaw + ')',
+            valB: (ratioB * 100).toFixed(1) + '% (' + sB.totalEpochs + '/' + sB.totalEpochsRaw + ')',
+            diff: diff,
+            higherBetter: true
+        });
+    }
+
+    // 8. Average confidence
+    if (sA.avgConfidence > 0 && sB.avgConfidence > 0) {
+        const diff = sA.avgConfidence - sB.avgConfidence;
+        criteria.push({
+            name: 'Confiance moyenne',
+            weight: 1,
+            score: Math.max(-1, Math.min(1, diff / 0.10)),
+            valA: (sA.avgConfidence * 100).toFixed(1) + '%',
+            valB: (sB.avgConfidence * 100).toFixed(1) + '%',
+            diff: diff,
+            higherBetter: true
+        });
+    }
+
+    // --- Compute weighted total (relative) ---
+    let totalWeight = 0, weightedSum = 0;
+    for (const c of criteria) {
+        totalWeight += c.weight;
+        weightedSum += c.score * c.weight;
+    }
+    const globalScore = totalWeight > 0 ? weightedSum / totalWeight : 0; // -1 to +1
+
+    // --- Score absolu sur 100 pour chaque algo ---
+    // Moyenne pondérée des critères, chacun noté sur 100 :
+    //   ★ Précision par stade (poids 5)            = moyenne des précisions par stade × 100
+    //   Précision A1 (poids 3)                    = accA1 × 100
+    //   Précision A2 (poids 2)                    = accA2 × 100
+    //   Kappa A1 (poids 3)                        = kappa × 100
+    //   Kappa A2 (poids 2)                        = kappa × 100
+    //   F1 pondéré par epochs (poids 3)           = Σ(F1×support) / Σsupport × 100
+    //   Robustesse pire stade (poids 2)           = worstF1 × 100  (stades ≥10 epochs)
+    //   Rappel effectif par stade (poids 3)       = recall pondéré × rétention
+    //   Rétention au seuil (poids 2)              = (epochs filtrées / epochs brutes) × 100
+    //   Confiance moyenne (poids 1)               = avgConfidence × 100
+    function computeAbsoluteScore(stats) {
+        let wSum = 0, wTotal = 0;
+        const details = [];
+
+        // 0. Précision par stade (poids 5) — critère dominant
+        // Moyenne des précisions par stade (chaque stade pèse autant)
+        {
+            let pSum = 0, pN = 0;
+            for (const stage of stagesWithMetrics) {
+                const prec = stats.perStageAccA1[stage];
+                if (prec != null) { pSum += prec; pN++; }
+            }
+            if (pN > 0) {
+                const v = (pSum / pN) * 100;
+                wSum += v * 5; wTotal += 5;
+                details.push({ name: 'Pr\u00e9cision par stade', val: v, weight: 5 });
+            }
+        }
+
+        // 1. Précision A1 (poids 3)
+        if (stats.accA1 != null) {
+            const v = stats.accA1 * 100;
+            wSum += v * 3; wTotal += 3;
+            details.push({ name: 'Pr\u00e9cision A1', val: v, weight: 3 });
+        }
+        // 2. Précision A2 (poids 2)
+        if (stats.accA2 != null) {
+            const v = stats.accA2 * 100;
+            wSum += v * 2; wTotal += 2;
+            details.push({ name: 'Pr\u00e9cision A2', val: v, weight: 2 });
+        }
+        // 3. Kappa A1 (poids 3)
+        if (stats.kappaIA_A1 != null) {
+            const v = Math.max(0, stats.kappaIA_A1) * 100;
+            wSum += v * 3; wTotal += 3;
+            details.push({ name: 'Kappa A1', val: v, weight: 3 });
+        }
+        // 4. Kappa A2 (poids 2)
+        if (stats.kappaIA_A2 != null) {
+            const v = Math.max(0, stats.kappaIA_A2) * 100;
+            wSum += v * 2; wTotal += 2;
+            details.push({ name: 'Kappa A2', val: v, weight: 2 });
+        }
+        // 5. F1 pondéré par support (poids 3)
+        let wf1Sum = 0, supSum = 0;
+        for (const stage of stagesWithMetrics) {
+            const m = stats.metrics[stage];
+            if (m && m.f1 != null && m.support > 0) { wf1Sum += m.f1 * m.support; supSum += m.support; }
+        }
+        if (supSum > 0) {
+            const v = (wf1Sum / supSum) * 100;
+            wSum += v * 3; wTotal += 3;
+            details.push({ name: 'F1 pond\u00e9r\u00e9', val: v, weight: 3 });
+        }
+        // 6. Robustesse pire stade (poids 2) — stades ≥ 10 epochs uniquement
+        let worstF1 = 1;
+        for (const stage of stagesWithMetrics) {
+            const m = stats.metrics[stage];
+            if (m && m.f1 != null && m.support >= 10) worstF1 = Math.min(worstF1, m.f1);
+        }
+        if (worstF1 < 1) {
+            const v = worstF1 * 100;
+            wSum += v * 2; wTotal += 2;
+            details.push({ name: 'Robustesse (pire F1)', val: v, weight: 2 });
+        }
+        // 7. Rappel pondéré par stade (poids 3)
+        //    Pour chaque stade : combien d'epochs réelles de ce stade sont correctement
+        //    classées ? Les epochs sous le seuil comptent comme ratées.
+        //    recall_stade = TP / (TP + FN),  pondéré par le nb réel d'epochs du stade
+        //    Un algo qui trouve 267/300 Wake (89%) et 0/2 N1 (0%) → score ~88
+        //    Un algo qui trouve 2/2 N1 (100%) mais rate 200/300 Wake → score ~33
+        let recallWSum = 0, recallSupSum = 0;
+        for (const stage of stagesWithMetrics) {
+            const m = stats.metrics[stage];
+            if (m && m.recall != null && m.support > 0) {
+                recallWSum += m.recall * m.support;
+                recallSupSum += m.support;
+            }
+        }
+        if (recallSupSum > 0) {
+            // Pénaliser par la rétention : les epochs filtrées sont des epochs ratées
+            const retention = stats.totalEpochsRaw > 0 ? stats.totalEpochs / stats.totalEpochsRaw : 1;
+            const v = (recallWSum / recallSupSum) * retention * 100;
+            wSum += v * 3; wTotal += 3;
+            details.push({ name: 'Rappel effectif (par stade)', val: v, weight: 3 });
+        }
+        // 8. Rétention au seuil (poids 2)
+        if (stats.totalEpochsRaw > 0) {
+            const v = (stats.totalEpochs / stats.totalEpochsRaw) * 100;
+            wSum += v * 2; wTotal += 2;
+            details.push({ name: 'R\u00e9tention au seuil', val: v, weight: 2 });
+        }
+        // 9. Confiance moyenne (poids 1)
+        if (stats.avgConfidence > 0) {
+            const v = stats.avgConfidence * 100;
+            wSum += v * 1; wTotal += 1;
+            details.push({ name: 'Confiance moyenne', val: v, weight: 1 });
+        }
+
+        const score = wTotal > 0 ? Math.round(wSum / wTotal) : 0;
+        return { score, details };
+    }
+
+    const resA = computeAbsoluteScore(sA);
+    const resB = computeAbsoluteScore(sB);
+    const scoreA = resA.score;
+    const scoreB = resB.score;
+
+    // --- Determine winner (basé sur globalScore relatif) ---
+    const margin = 0.05;
+    let winner, loser, winnerName, loserName;
+    if (globalScore > margin) {
+        winner = sA; loser = sB; winnerName = nameA; loserName = nameB;
+    } else if (globalScore < -margin) {
+        winner = sB; loser = sA; winnerName = nameB; loserName = nameA;
+    } else {
+        winner = null;
+    }
+
+    // --- Per-stage winners (pondéré par le volume d'epochs) ---
+    // Un stade avec beaucoup d'epochs et un bon F1 pèse plus qu'un stade avec 1 epoch à 100%
+    const stageWinners = {};
+    const stageDetails = {}; // pour affichage détaillé
+    for (const stage of stagesWithMetrics) {
+        const mA = sA.metrics[stage];
+        const mB = sB.metrics[stage];
+        const supA = mA ? mA.support : 0;
+        const supB = mB ? mB.support : 0;
+        // Score = F1 * log(1 + support) — avantage logarithmique au volume
+        const scoreA = (mA && mA.f1 != null && supA > 0) ? mA.f1 * Math.log2(1 + supA) : 0;
+        const scoreB = (mB && mB.f1 != null && supB > 0) ? mB.f1 * Math.log2(1 + supB) : 0;
+        stageDetails[stage] = { scoreA, scoreB, supA, supB };
+        if (mA && mB && mA.f1 != null && mB.f1 != null) {
+            // Comparer les scores pondérés, pas juste le F1 brut
+            if (scoreA - scoreB > 0.1) stageWinners[stage] = nameA;
+            else if (scoreB - scoreA > 0.1) stageWinners[stage] = nameB;
+            else stageWinners[stage] = null;
+        }
+    }
+
+    // --- Build advantages/disadvantages ---
+    function buildProsCons(stats, other, name, otherName) {
+        const pros = [], cons = [];
+        // Accuracy
+        if (stats.accA1 != null && other.accA1 != null) {
+            if (stats.accA1 > other.accA1 + 0.005)
+                pros.push('Meilleure pr\u00e9cision globale vs A1 (' + (stats.accA1 * 100).toFixed(1) + '% vs ' + (other.accA1 * 100).toFixed(1) + '%)');
+            else if (stats.accA1 < other.accA1 - 0.005)
+                cons.push('Pr\u00e9cision globale inf\u00e9rieure vs A1 (' + (stats.accA1 * 100).toFixed(1) + '% vs ' + (other.accA1 * 100).toFixed(1) + '%)');
+        }
+        // Per-stage precision — highlight stages with big differences
+        for (const stage of stagesWithMetrics) {
+            const precS = stats.perStageAccA1[stage];
+            const precO = other.perStageAccA1[stage];
+            if (precS != null && precO != null) {
+                const d = precS - precO;
+                if (d > 0.10)
+                    pros.push('Bien meilleure pr\u00e9cision sur ' + stage + ' (' + (precS * 100).toFixed(1) + '% vs ' + (precO * 100).toFixed(1) + '%, +' + (d * 100).toFixed(0) + '%)');
+                else if (d > 0.03)
+                    pros.push('Meilleure pr\u00e9cision sur ' + stage + ' (' + (precS * 100).toFixed(1) + '% vs ' + (precO * 100).toFixed(1) + '%)');
+                else if (d < -0.10)
+                    cons.push('Pr\u00e9cision tr\u00e8s inf\u00e9rieure sur ' + stage + ' (' + (precS * 100).toFixed(1) + '% vs ' + (precO * 100).toFixed(1) + '%, ' + (d * 100).toFixed(0) + '%)');
+                else if (d < -0.03)
+                    cons.push('Pr\u00e9cision inf\u00e9rieure sur ' + stage + ' (' + (precS * 100).toFixed(1) + '% vs ' + (precO * 100).toFixed(1) + '%)');
+            }
+        }
+        // Kappa
+        if (stats.kappaIA_A1 != null && other.kappaIA_A1 != null) {
+            if (stats.kappaIA_A1 > other.kappaIA_A1 + 0.01)
+                pros.push('Meilleur accord Kappa vs A1 (' + stats.kappaIA_A1.toFixed(3) + ' vs ' + other.kappaIA_A1.toFixed(3) + ')');
+            else if (stats.kappaIA_A1 < other.kappaIA_A1 - 0.01)
+                cons.push('Accord Kappa inf\u00e9rieur vs A1 (' + stats.kappaIA_A1.toFixed(3) + ' vs ' + other.kappaIA_A1.toFixed(3) + ')');
+        }
+        // F1 stages — mention le support pour contextualiser
+        for (const stage of stagesWithMetrics) {
+            const mS = stats.metrics[stage];
+            const mO = other.metrics[stage];
+            if (mS && mO && mS.f1 != null && mO.f1 != null) {
+                const supS = mS.support || 0;
+                const supO = mO.support || 0;
+                const supInfo = ' (' + supS + ' epochs)';
+                if (mS.f1 > mO.f1 + 0.03) {
+                    if (supS >= 10)
+                        pros.push('Meilleur F1 sur ' + stage + ' (' + (mS.f1 * 100).toFixed(1) + '% vs ' + (mO.f1 * 100).toFixed(1) + '%)' + supInfo);
+                    else
+                        pros.push('F1 ' + stage + ' sup\u00e9rieur mais peu de donn\u00e9es' + supInfo);
+                } else if (mS.f1 < mO.f1 - 0.03) {
+                    if (supS >= 10)
+                        cons.push('F1 inf\u00e9rieur sur ' + stage + ' (' + (mS.f1 * 100).toFixed(1) + '% vs ' + (mO.f1 * 100).toFixed(1) + '%)' + supInfo);
+                    else
+                        cons.push('F1 ' + stage + ' inf\u00e9rieur, mais peu de donn\u00e9es' + supInfo);
+                }
+                // Volume advantage: more correctly detected epochs
+                if (supS > supO * 1.5 && supS >= 10 && Math.abs(mS.f1 - mO.f1) < 0.03)
+                    pros.push('Plus d\'\u00e9pochs d\u00e9tect\u00e9es sur ' + stage + ' (' + supS + ' vs ' + supO + ') \u00e0 F1 comparable');
+                else if (supO > supS * 1.5 && supO >= 10 && Math.abs(mS.f1 - mO.f1) < 0.03)
+                    cons.push('Moins d\'\u00e9pochs d\u00e9tect\u00e9es sur ' + stage + ' (' + supS + ' vs ' + supO + ')');
+            }
+        }
+        // Data retention
+        const retA = stats.totalEpochsRaw > 0 ? stats.totalEpochs / stats.totalEpochsRaw : 1;
+        const retB = other.totalEpochsRaw > 0 ? other.totalEpochs / other.totalEpochsRaw : 1;
+        if (retA > retB + 0.05)
+            pros.push('Plus de donn\u00e9es au-dessus du seuil (' + (retA * 100).toFixed(1) + '% vs ' + (retB * 100).toFixed(1) + '%)');
+        else if (retA < retB - 0.05)
+            cons.push('Moins de donn\u00e9es au-dessus du seuil (' + (retA * 100).toFixed(1) + '% vs ' + (retB * 100).toFixed(1) + '%)');
+        // Confidence
+        if (stats.avgConfidence > other.avgConfidence + 0.02)
+            pros.push('Confiance moyenne sup\u00e9rieure (' + (stats.avgConfidence * 100).toFixed(1) + '%)');
+        else if (stats.avgConfidence < other.avgConfidence - 0.02)
+            cons.push('Confiance moyenne inf\u00e9rieure (' + (stats.avgConfidence * 100).toFixed(1) + '%)');
+        // Speed
+        return { pros, cons };
+    }
+
+    const pcA = buildProsCons(sA, sB, nameA, nameB);
+    const pcB = buildProsCons(sB, sA, nameB, nameA);
+
+    // --- Format threshold info ---
+    const threshInfo = cmpState.confMode === 'individual'
+        ? nameA + ' : ' + (thA * 100).toFixed(0) + '% / ' + nameB + ' : ' + (thB * 100).toFixed(0) + '%'
+        : (thA * 100).toFixed(0) + '%';
+
+    // --- Build HTML ---
+    let html = '';
+
+    // Score bar — basée sur globalScore relatif (-1 à +1)
+    const barPct = ((globalScore + 1) / 2 * 100); // 0-100, 50 = tie
+    const scoreColor = globalScore > margin ? '#22c55e' : globalScore < -margin ? '#3b82f6' : '#f59e0b';
+    const verdictText = winner
+        ? '<span style="color:' + scoreColor + ';font-weight:700;font-size:18px">' + winnerName + '</span> est globalement meilleur'
+        : '<span style="color:#f59e0b;font-weight:700;font-size:18px">\u00C9galit\u00e9</span> \u2014 les deux algorithmes sont comparables';
+
+    html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:16px;">';
+
+    // Scores /100 en haut
+    const scoreColorA = scoreA >= 80 ? '#22c55e' : scoreA >= 60 ? '#f59e0b' : '#ef4444';
+    const scoreColorB = scoreB >= 80 ? '#22c55e' : scoreB >= 60 ? '#f59e0b' : '#ef4444';
+
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">';
+    // Score A — gauche
+    html += '<div style="text-align:center;">';
+    html += '<div style="font-size:13px;color:#22c55e;font-weight:600;margin-bottom:4px;">' + nameA + '</div>';
+    html += '<div style="font-size:42px;font-weight:800;color:' + scoreColorA + ';line-height:1;">' + scoreA + '</div>';
+    html += '<div style="font-size:12px;color:var(--text-secondary);">/ 100</div>';
+    html += '</div>';
+    // Verdict — centre
+    html += '<div style="text-align:center;flex:1;">';
+    html += '<div style="font-size:13px;color:var(--text-secondary);margin-bottom:6px;">Seuil de confiance : ' + threshInfo + '</div>';
+    html += '<div style="margin-bottom:10px;">' + verdictText + '</div>';
+    html += '</div>';
+    // Score B — droite
+    html += '<div style="text-align:center;">';
+    html += '<div style="font-size:13px;color:#3b82f6;font-weight:600;margin-bottom:4px;">' + nameB + '</div>';
+    html += '<div style="font-size:42px;font-weight:800;color:' + scoreColorB + ';line-height:1;">' + scoreB + '</div>';
+    html += '<div style="font-size:12px;color:var(--text-secondary);">/ 100</div>';
+    html += '</div>';
+    html += '</div>';
+
+    // Visual bar — vert à gauche, bleu à droite, curseur se déplace
+    html += '<div style="position:relative;height:28px;background:#1e2330;border-radius:14px;overflow:hidden;max-width:500px;margin:0 auto;">';
+    html += '<div style="position:absolute;left:0;top:0;height:100%;width:' + barPct.toFixed(1) + '%;background:#22c55e;border-radius:14px 0 0 14px;transition:width 0.4s;"></div>';
+    html += '<div style="position:absolute;right:0;top:0;height:100%;width:' + (100 - barPct).toFixed(1) + '%;background:#3b82f6;border-radius:0 14px 14px 0;transition:width 0.4s;"></div>';
+    html += '<div style="position:absolute;left:50%;top:0;width:2px;height:100%;background:rgba(255,255,255,0.3);transform:translateX(-1px);"></div>';
+    html += '<div style="position:absolute;left:8px;top:50%;transform:translateY(-50%);font-size:11px;color:#fff;font-weight:600;">' + nameA + '</div>';
+    html += '<div style="position:absolute;right:8px;top:50%;transform:translateY(-50%);font-size:11px;color:#fff;font-weight:600;">' + nameB + '</div>';
+    html += '</div>';
+    html += '</div>';
+
+    // Criteria table
+    html += '<table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:16px;">';
+    html += '<tr style="border-bottom:1px solid var(--border);">';
+    html += '<th style="text-align:left;padding:6px 8px;color:var(--text-secondary);">Crit\u00e8re</th>';
+    html += '<th style="text-align:center;padding:6px 8px;color:var(--text-secondary);">Poids</th>';
+    html += '<th style="text-align:center;padding:6px 8px;color:#22c55e;">' + nameA + '</th>';
+    html += '<th style="text-align:center;padding:6px 8px;color:#3b82f6;">' + nameB + '</th>';
+    html += '<th style="text-align:center;padding:6px 8px;color:var(--text-secondary);">Avantage</th>';
+    html += '</tr>';
+
+    for (const c of criteria) {
+        const aWins = c.higherBetter ? c.diff > 0.002 : c.diff < -0.002;
+        const bWins = c.higherBetter ? c.diff < -0.002 : c.diff > 0.002;
+        const advColor = aWins ? '#22c55e' : bWins ? '#3b82f6' : '#9aa0a6';
+        const advText = aWins ? nameA : bWins ? nameB : '\u2014';
+        const maxW = 5;
+        const weightDots = '\u2B24'.repeat(c.weight) + '<span style="opacity:0.2">' + '\u2B24'.repeat(maxW - c.weight) + '</span>';
+
+        html += '<tr style="border-bottom:1px solid rgba(255,255,255,0.05);">';
+        html += '<td style="padding:6px 8px;color:var(--text-primary);">' + c.name + '</td>';
+        html += '<td style="text-align:center;padding:6px 8px;font-size:8px;color:#f59e0b;">' + weightDots + '</td>';
+        html += '<td style="text-align:center;padding:6px 8px;' + (aWins ? 'color:#22c55e;font-weight:600' : 'color:var(--text-secondary)') + '">' + c.valA + '</td>';
+        html += '<td style="text-align:center;padding:6px 8px;' + (bWins ? 'color:#3b82f6;font-weight:600' : 'color:var(--text-secondary)') + '">' + c.valB + '</td>';
+        html += '<td style="text-align:center;padding:6px 8px;color:' + advColor + ';font-weight:600;">' + advText + '</td>';
+        html += '</tr>';
+    }
+    html += '</table>';
+    html += '</div>';
+
+    // --- Pros / Cons cards ---
+    html += '<div style="display:flex;gap:16px;flex-wrap:wrap;">';
+
+    function prosConsCard(name, color, pc) {
+        let card = '<div style="flex:1;min-width:280px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:20px;">';
+        card += '<h3 style="margin:0 0 12px;color:' + color + ';">' + name + '</h3>';
+        if (pc.pros.length > 0) {
+            card += '<div style="margin-bottom:10px;"><span style="color:#22c55e;font-weight:600;font-size:12px;">AVANTAGES</span></div>';
+            for (const p of pc.pros) {
+                card += '<div style="padding:4px 0 4px 16px;color:var(--text-primary);font-size:13px;border-left:2px solid #22c55e;margin-bottom:4px;">' + p + '</div>';
+            }
+        }
+        if (pc.cons.length > 0) {
+            card += '<div style="margin:10px 0;"><span style="color:#ef4444;font-weight:600;font-size:12px;">INCONVENIENTS</span></div>';
+            for (const c of pc.cons) {
+                card += '<div style="padding:4px 0 4px 16px;color:var(--text-primary);font-size:13px;border-left:2px solid #ef4444;margin-bottom:4px;">' + c + '</div>';
+            }
+        }
+        if (pc.pros.length === 0 && pc.cons.length === 0) {
+            card += '<div style="color:var(--text-secondary);font-size:13px;">Aucune diff\u00e9rence notable d\u00e9tect\u00e9e.</div>';
+        }
+        card += '</div>';
+        return card;
+    }
+
+    html += prosConsCard(nameA, '#22c55e', pcA);
+    html += prosConsCard(nameB, '#3b82f6', pcB);
+    html += '</div>';
+
+    // --- Per-stage verdict ---
+    html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:20px;margin-top:16px;">';
+    html += '<h3 style="margin:0 0 4px;color:var(--text-primary);">Verdict par stade</h3>';
+    html += '<div style="font-size:11px;color:var(--text-secondary);margin-bottom:12px;">Score = F1 \u00d7 log\u2082(1 + nb epochs) \u2014 un bon F1 sur beaucoup d\'\u00e9pochs p\u00e8se plus</div>';
+    html += '<div style="display:flex;gap:10px;flex-wrap:wrap;">';
+    for (const stage of stagesWithMetrics) {
+        const sw = stageWinners[stage];
+        const sd = stageDetails[stage];
+        const stageColor = (typeof STAGE_COLORS !== 'undefined' && STAGE_COLORS[stage]) ? STAGE_COLORS[stage] : '#9aa0a6';
+        const mA = sA.metrics[stage];
+        const mB = sB.metrics[stage];
+        const f1A = mA && mA.f1 != null ? (mA.f1 * 100).toFixed(1) + '%' : 'N/A';
+        const f1B = mB && mB.f1 != null ? (mB.f1 * 100).toFixed(1) + '%' : 'N/A';
+        const supA = sd ? sd.supA : 0;
+        const supB = sd ? sd.supB : 0;
+        const bgColor = sw === nameA ? 'rgba(34,197,94,0.1)' : sw === nameB ? 'rgba(59,130,246,0.1)' : 'rgba(255,255,255,0.03)';
+        const borderColor = sw === nameA ? '#22c55e' : sw === nameB ? '#3b82f6' : 'var(--border)';
+        html += '<div style="flex:1;min-width:130px;background:' + bgColor + ';border:1px solid ' + borderColor + ';border-radius:8px;padding:12px;text-align:center;">';
+        html += '<div style="font-weight:600;color:' + stageColor + ';margin-bottom:4px;">' + stage + '</div>';
+        html += '<div style="font-size:12px;color:var(--text-secondary);">F1 : ' + f1A + ' / ' + f1B + '</div>';
+        html += '<div style="font-size:11px;color:var(--text-secondary);">Epochs : ' + supA + ' / ' + supB + '</div>';
+        html += '<div style="font-size:11px;margin-top:4px;font-weight:600;color:' + borderColor + ';">' + (sw || '\u00C9gal') + '</div>';
+        html += '</div>';
+    }
+    html += '</div></div>';
+
+    // --- Final recommendation ---
+    html += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:20px;margin-top:16px;">';
+    html += '<h3 style="margin:0 0 10px;color:var(--text-primary);">Recommandation</h3>';
+    html += '<div style="color:var(--text-primary);font-size:14px;line-height:1.6;">';
+
+    if (winner) {
+        const winScore = winner === sA ? scoreA : scoreB;
+        const loseScore = winner === sA ? scoreB : scoreA;
+        const stageWins = Object.values(stageWinners).filter(w => w === winnerName).length;
+        const stageTies = Object.values(stageWinners).filter(w => w === null).length;
+        const stageLosses = Object.values(stageWinners).filter(w => w === loserName).length;
+
+        html += '<strong style="color:' + scoreColor + ';">' + winnerName + '</strong> obtient un score de <strong>' + winScore + '/100</strong> ';
+        html += 'contre <strong>' + loseScore + '/100</strong> pour ' + loserName + ' (+ ' + (winScore - loseScore) + ' pts). ';
+        html += 'Sur les ' + stagesWithMetrics.length + ' stades, <strong>' + winnerName + '</strong> domine sur ';
+        html += '<strong>' + stageWins + '</strong> stade' + (stageWins > 1 ? 's' : '');
+        if (stageTies > 0) html += ', est \u00e0 \u00e9galit\u00e9 sur <strong>' + stageTies + '</strong>';
+        if (stageLosses > 0) html += ' et est inf\u00e9rieur sur <strong>' + stageLosses + '</strong>';
+        html += '.';
+
+        // Data volume comment
+        const retWinner = winner.totalEpochsRaw > 0 ? winner.totalEpochs / winner.totalEpochsRaw : 1;
+        const retLoser = loser.totalEpochsRaw > 0 ? loser.totalEpochs / loser.totalEpochsRaw : 1;
+        if (retWinner > retLoser + 0.05) {
+            html += ' De plus, <strong>' + winnerName + '</strong> conserve davantage de donn\u00e9es au-dessus du seuil de confiance ';
+            html += '(' + (retWinner * 100).toFixed(1) + '% vs ' + (retLoser * 100).toFixed(1) + '%), ce qui renforce sa fiabilit\u00e9.';
+        } else if (retLoser > retWinner + 0.05) {
+            html += ' Cependant, <strong>' + loserName + '</strong> conserve davantage de donn\u00e9es au-dessus du seuil ';
+            html += '(' + (retLoser * 100).toFixed(1) + '% vs ' + (retWinner * 100).toFixed(1) + '%), ';
+            html += 'ce qui peut \u00eatre un avantage en conditions r\u00e9elles.';
+        }
+    } else {
+        html += 'Les deux algorithmes pr\u00e9sentent des <strong>performances comparables</strong> au seuil de confiance actuel. ';
+        html += 'Essayez de modifier le seuil de confiance pour r\u00e9v\u00e9ler des diff\u00e9rences plus marqu\u00e9es.';
+    }
+
+    html += '</div></div>';
+
+    el.innerHTML = html;
+  } catch (err) {
+    el.innerHTML = '<div style="color:#ef4444;padding:20px;">Erreur synthèse : ' + err.message + '<br><pre>' + err.stack + '</pre></div>';
+  }
+}
+
+// ============================================================================
 // Init
 // ============================================================================
 
@@ -751,6 +1376,22 @@ function cmpInit() {
         document.getElementById('cmpCountA').textContent = '0 fichiers';
         document.getElementById('cmpCountB').textContent = '0 fichiers';
         cmpShowSections();
+        cmpSaveToIDB();
+    });
+
+    // Effacer un seul algo
+    document.getElementById('cmpClearA').addEventListener('click', function () {
+        cmpState.sidesData.A = [];
+        document.getElementById('cmpCountA').textContent = '0 fichiers';
+        cmpShowSections();
+        if (cmpState.sidesData.B.length > 0 && cmpState.sidesData.A.length > 0) cmpRefreshAll();
+        cmpSaveToIDB();
+    });
+    document.getElementById('cmpClearB').addEventListener('click', function () {
+        cmpState.sidesData.B = [];
+        document.getElementById('cmpCountB').textContent = '0 fichiers';
+        cmpShowSections();
+        if (cmpState.sidesData.A.length > 0 && cmpState.sidesData.B.length > 0) cmpRefreshAll();
         cmpSaveToIDB();
     });
 

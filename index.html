@@ -1057,6 +1057,7 @@
                 <div class="control-group">
                     <input type="file" id="cmpFolderA" webkitdirectory multiple hidden>
                     <button class="btn btn-primary" onclick="document.getElementById('cmpFolderA').click()">Charger dossier A</button>
+                    <button id="cmpClearA" class="btn btn-danger btn-sm">Effacer A</button>
                     <span id="cmpCountA" class="text-muted">0 fichiers</span>
                 </div>
             </div>
@@ -1066,6 +1067,7 @@
                 <div class="control-group">
                     <input type="file" id="cmpFolderB" webkitdirectory multiple hidden>
                     <button class="btn btn-primary" onclick="document.getElementById('cmpFolderB').click()">Charger dossier B</button>
+                    <button id="cmpClearB" class="btn btn-danger btn-sm">Effacer B</button>
                     <span id="cmpCountB" class="text-muted">0 fichiers</span>
                 </div>
             </div>
@@ -1143,6 +1145,11 @@
         </div>
         <div class="cmp-dual" id="cmpKappaDual">
         </div>
+    </section>
+
+    <section id="cmpSynthesisSection" style="display:none;">
+        <h2>Evaluation et Synth&#xe8;se</h2>
+        <div id="cmpSynthesisContent"></div>
     </section>
 
     </div><!-- fin tabComparative -->
