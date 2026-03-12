@@ -607,6 +607,17 @@ async function restoreFromStorage() {
         updateFnCheckboxes();
         updateFullNightSlider();
 
+        // Restaurer le nom du fichier dans le panneau principal
+        if (_restoredFileName && !state.fileRef) {
+            const fnEl = document.getElementById('fileName');
+            if (fnEl) {
+                const nEpochs = state.fullNightEog
+                    ? Math.floor(state.fullNightEog.length / CHUNK_SIZE)
+                    : state.totalEpochs || '?';
+                fnEl.textContent = `${_restoredFileName} (~${nEpochs} epochs, en mémoire)`;
+            }
+        }
+
         // Restaurer les indicateurs de l'onglet analyse
         if (_restoredFileName) {
             const analysisDataName = document.getElementById('analysisDataName');
@@ -847,6 +858,8 @@ function processReceivedData(data) {
                 ];
                 lines.forEach(l => log(l, 'timing'));
             }
+        } else if (trimmed.startsWith('@DBG:')) {
+            log(`DBG: ${trimmed.substring(5)}`, 'recv');
         } else if (trimmed.startsWith('@INFO:')) {
             log(`ESP32: ${trimmed.substring(6)}`, 'recv');
         } else if (trimmed.startsWith('[')) {
@@ -903,8 +916,9 @@ async function sendData(values, speed) {
     let sentCount = 0;
     const t0 = performance.now();
 
+    let writer = null;
     try {
-        const writer = state.port.writable.getWriter();
+        writer = state.port.writable.getWriter();
         const encoder = new TextEncoder();
 
         for (let i = 0; i < values.length; i += BATCH_SIZE) {
@@ -924,10 +938,12 @@ async function sendData(values, speed) {
                 await sleep(batchDelayMs);
             }
         }
-
-        writer.releaseLock();
     } catch (err) {
         log(`Erreur envoi donnees: ${err.message}`, 'error');
+    } finally {
+        if (writer) {
+            try { writer.releaseLock(); } catch (_) {}
+        }
     }
 }
 
@@ -1110,6 +1126,24 @@ async function* createEpochReader(file, config) {
     }
 }
 
+/**
+ * Generateur d'epochs a partir du signal fullNightEog deja en memoire.
+ * Utilise quand fileRef n'est plus disponible (apres reconnexion/refresh).
+ */
+async function* createEpochReaderFromMemory(eogArray, annots1, annots2) {
+    const totalSamples = eogArray.length;
+    const totalEpochs = Math.floor(totalSamples / CHUNK_SIZE);
+    for (let i = 0; i < totalEpochs; i++) {
+        const start = i * CHUNK_SIZE;
+        yield {
+            index: i,
+            eogData: Array.from(eogArray.slice(start, start + CHUNK_SIZE)),
+            annot1: (annots1 && annots1[i]) || null,
+            annot2: (annots2 && annots2[i]) || null,
+        };
+    }
+}
+
 function normalizeAnnotation(raw) {
     if (raw === undefined || raw === null || raw === '') return null;
     const s = String(raw).toUpperCase().trim();
@@ -1148,7 +1182,12 @@ function modeValue(arr) {
 // ============================================================================
 
 async function startStreaming() {
-    if (!state.connected || !state.fileRef) return;
+    const hasSource = state.fileRef || (state.fullNightEog && state.fullNightEog.length >= CHUNK_SIZE);
+    if (!state.connected || !hasSource) return;
+
+    // Sauvegarder les annotations avant reset (pour le reader memoire)
+    const savedAnnots1 = !state.fileRef ? [...state.annotations1] : [];
+    const savedAnnots2 = !state.fileRef ? [...state.annotations2] : [];
 
     state.running = true;
     state.paused = false;
@@ -1164,14 +1203,31 @@ async function startStreaming() {
     savePredictionsToIDB();
     updateControls();
 
+    // Vider l'historique visuel des predictions precedentes
+    const histBody = document.getElementById('historyBody');
+    if (histBody) histBody.innerHTML = '';
+
+    // Notifier la sidebar que des donnees temps-reel sont disponibles
+    if (typeof window.sidebarNotifyRealtimeData === 'function') {
+        window.sidebarNotifyRealtimeData(true);
+    }
+
     // Reset l'historique ESP32
     await sendCommand('#RESET');
     await sleep(200);
 
-    log('=== Demarrage du streaming (lecture fichier en continu) ===', 'info');
+    // Si pas de fileRef mais fullNightEog en memoire, recalculer totalEpochs
+    if (!state.fileRef && state.fullNightEog) {
+        state.totalEpochs = Math.floor(state.fullNightEog.length / CHUNK_SIZE);
+        log(`=== Demarrage du streaming (depuis memoire, ${state.totalEpochs} epochs) ===`, 'info');
+    } else {
+        log('=== Demarrage du streaming (lecture fichier en continu) ===', 'info');
+    }
 
-    // Creer le lecteur d'epochs en streaming
-    const epochReader = createEpochReader(state.fileRef, state.fileConfig);
+    // Creer le lecteur d'epochs : fichier en streaming, ou fullNightEog en memoire
+    const epochReader = state.fileRef
+        ? createEpochReader(state.fileRef, state.fileConfig)
+        : createEpochReaderFromMemory(state.fullNightEog, savedAnnots1, savedAnnots2);
     let epochCount = 0;
 
     for await (const epoch of epochReader) {
@@ -1198,6 +1254,7 @@ async function startStreaming() {
 
         updateProgressUI();
         drawSignal(epoch.index);
+        if (state.fullNightEog || state.fullNightEogFiltre) drawFullNight();
 
         // Afficher immediatement les annotations + etat "en attente" pour ESP32
         showPendingEpoch(epoch.index);
@@ -1237,13 +1294,12 @@ async function startStreaming() {
 
     state.running = false;
     updateControls();
+    if (state.fullNightEog || state.fullNightEogFiltre) drawFullNight();  // Masquer la barre orange
 }
 
 async function sendEpochAndWaitPrediction(epochData, speed) {
     return new Promise(async (resolve) => {
-        // Preparer le callback de reception
-        state.waitingForPrediction = true;
-        state.predictionResolve = resolve;
+        let resolved = false;
 
         // Timeout adaptatif :
         //   temps d'envoi estime + 30s marge pour la CNN (en cas de charge)
@@ -1253,7 +1309,8 @@ async function sendEpochAndWaitPrediction(epochData, speed) {
         const timeoutMs = sendTimeMs + 30000;
 
         const timeout = setTimeout(() => {
-            if (state.waitingForPrediction) {
+            if (!resolved) {
+                resolved = true;
                 state.waitingForPrediction = false;
                 state.predictionResolve = null;
                 log(`Timeout: pas de prediction recue en ${(timeoutMs/1000).toFixed(0)}s`, 'error');
@@ -1261,20 +1318,21 @@ async function sendEpochAndWaitPrediction(epochData, speed) {
             }
         }, timeoutMs);
 
+        // Installer le callback AVANT d'envoyer les donnees
+        // pour que toute prediction recue pendant sendData soit correctement traitee
+        state.waitingForPrediction = true;
+        state.predictionResolve = (pred) => {
+            if (!resolved) {
+                resolved = true;
+                clearTimeout(timeout);
+                state.waitingForPrediction = false;
+                state.predictionResolve = null;
+                resolve(pred);
+            }
+        };
+
         // Envoyer les donnees avec la cadence choisie
         await sendData(epochData, speed);
-
-        // Attendre que handlePrediction soit appele via processReceivedData
-        // Le resolve sera appele dans handlePrediction
-
-        // Quand la prediction arrive, nettoyer le timeout
-        const originalResolve = state.predictionResolve;
-        state.predictionResolve = (pred) => {
-            clearTimeout(timeout);
-            state.waitingForPrediction = false;
-            state.predictionResolve = null;
-            originalResolve(pred);
-        };
     });
 }
 
@@ -1396,7 +1454,7 @@ function updateConnectionUI(connected, sending = false) {
 }
 
 function updateControls() {
-    const hasData = state.fileRef !== null;
+    const hasData = state.fileRef !== null || (state.fullNightEog && state.fullNightEog.length >= CHUNK_SIZE);
     const canStart = state.connected && hasData && !state.running;
 
     document.getElementById('btnConnect').disabled    = state.connected;
@@ -2143,6 +2201,35 @@ function drawFullNight() {
             ctx.strokeStyle = 'rgba(74, 158, 255, 0.6)';
             ctx.lineWidth = 1;
             ctx.strokeRect(clampX1, marginTop, clampX2 - clampX1, drawH);
+        }
+    }
+
+    // Barre de progression orange (classification temps reel uniquement)
+    if (state.running && state.currentEpoch >= 0 && totalSamples > 0) {
+        const progSample = (state.currentEpoch + 1) * CHUNK_SIZE;
+        const progX = marginLeft + ((progSample - start) / visible) * drawW;
+        const clampProgX = Math.max(marginLeft, Math.min(progX, marginLeft + drawW));
+
+        // Zone deja traitee (fond orange semi-transparent)
+        if (clampProgX > marginLeft) {
+            ctx.fillStyle = 'rgba(255, 152, 0, 0.10)';
+            ctx.fillRect(marginLeft, marginTop, clampProgX - marginLeft, drawH);
+        }
+
+        // Ligne verticale orange (position actuelle)
+        if (progX >= marginLeft && progX <= marginLeft + drawW) {
+            ctx.strokeStyle = '#ff9800';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(clampProgX, marginTop);
+            ctx.lineTo(clampProgX, marginTop + drawH);
+            ctx.stroke();
+
+            // Label epoch au-dessus de la ligne
+            ctx.fillStyle = '#ff9800';
+            ctx.font = 'bold 10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(`E${state.currentEpoch + 1}`, clampProgX, marginTop - 3);
         }
     }
 
@@ -5638,6 +5725,39 @@ function updateAdvancedAnalysis() {
 // ============================================================================
 
 document.addEventListener('DOMContentLoaded', async () => {
+    // =========================================================================
+    // Theme switcher
+    // =========================================================================
+    const themeSelect = document.getElementById('themeSelect');
+    const themeIcon = document.getElementById('themeIcon');
+    const THEMES = [
+        { value: 'dark', icon: '🌙' },
+        { value: 'light', icon: '☀️' },
+        { value: 'highcontrast', icon: '🔳' },
+    ];
+
+    function applyTheme(theme) {
+        document.body.classList.remove('theme-light', 'theme-highcontrast');
+        if (theme === 'light') document.body.classList.add('theme-light');
+        else if (theme === 'highcontrast') document.body.classList.add('theme-highcontrast');
+        localStorage.setItem('neuralix-theme', theme);
+        themeSelect.value = theme;
+        const t = THEMES.find(t => t.value === theme) || THEMES[0];
+        if (themeIcon) themeIcon.textContent = t.icon;
+    }
+
+    const savedTheme = localStorage.getItem('neuralix-theme') || 'dark';
+    applyTheme(savedTheme);
+    themeSelect.addEventListener('change', () => applyTheme(themeSelect.value));
+
+    if (themeIcon) {
+        themeIcon.addEventListener('click', () => {
+            const cur = THEMES.findIndex(t => t.value === themeSelect.value);
+            const next = THEMES[(cur + 1) % THEMES.length];
+            applyTheme(next.value);
+        });
+    }
+
     // Connexion Serial
     document.getElementById('btnConnect').addEventListener('click', connectSerial);
     document.getElementById('btnDisconnect').addEventListener('click', disconnectSerial);
@@ -5667,6 +5787,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         state.paused = false;
         log('Arret du streaming', 'info');
         updateControls();
+        if (state.fullNightEog || state.fullNightEogFiltre) drawFullNight();
     });
 
     document.getElementById('btnReset').addEventListener('click', async () => {

@@ -2036,3 +2036,79 @@ section.sidebar-section-hidden {
 #cmpClearBtn {
     margin-top: 8px;
 }
+
+/* ============================================================================
+   Theme: Light
+   ============================================================================ */
+body.theme-light {
+    --bg-primary: #f0f2f5;
+    --bg-secondary: #e4e6ea;
+    --bg-card: #ffffff;
+    --bg-input: #e8eaed;
+    --text-primary: #1a1d23;
+    --text-secondary: #5f6368;
+    --text-muted: #80868b;
+    --border: #dadce0;
+    --accent: #1a73e8;
+    --accent-hover: #1565c0;
+    --success: #188038;
+    --warning: #e37400;
+    --danger: #d93025;
+}
+body.theme-light .console {
+    background: #fff;
+    border-color: var(--border);
+}
+body.theme-light canvas {
+    filter: invert(1) hue-rotate(180deg);
+}
+
+/* ============================================================================
+   Theme: High Contrast
+   ============================================================================ */
+body.theme-highcontrast {
+    --bg-primary: #000;
+    --bg-secondary: #111;
+    --bg-card: #111;
+    --bg-input: #222;
+    --text-primary: #fff;
+    --text-secondary: #ccc;
+    --text-muted: #aaa;
+    --border: #555;
+    --accent: #00e5ff;
+    --accent-hover: #40efff;
+    --success: #00e676;
+    --warning: #ffea00;
+    --danger: #ff1744;
+}
+body.theme-highcontrast .btn {
+    border-width: 2px;
+    font-weight: 700;
+}
+
+/* ============================================================================
+   Theme selector
+   ============================================================================ */
+.theme-selector {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.theme-selector select {
+    background: var(--bg-input);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 12px;
+    cursor: pointer;
+    outline: none;
+}
+.theme-selector select:hover {
+    border-color: var(--accent);
+}
+.theme-selector .theme-icon {
+    font-size: 16px;
+    cursor: pointer;
+    user-select: none;
+}

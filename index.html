@@ -18,6 +18,14 @@
             <span class="version">Sleep Stage Classifier - ESP32-S3</span>
         </div>
         <div class="header-right">
+            <div class="theme-selector">
+                <span id="themeIcon" class="theme-icon" title="Changer de thème">🌙</span>
+                <select id="themeSelect">
+                    <option value="dark">Sombre</option>
+                    <option value="light">Clair</option>
+                    <option value="highcontrast">Contraste élevé</option>
+                </select>
+            </div>
             <span id="connectionStatus" class="status disconnected">Déconnecté</span>
         </div>
     </header>
@@ -622,7 +630,7 @@
             </div>
             <div>
                 <label>Lignes d'en-tête à ignorer :</label>
-                <input type="number" id="cfgSkipLines" value="1" min="0">
+                <input type="number" id="cfgSkipLines" value="0" min="0">
             </div>
             <div>
                 <label>Annotations par:</label>
