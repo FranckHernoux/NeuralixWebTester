@@ -217,6 +217,25 @@ function cmpComputeSideStats(files, threshold) {
     let totalEpochsRaw = 0;
     for (const f of files) totalEpochsRaw += (f.data.predictions || []).length;
 
+    // Compteurs bruts par stade predit (sans filtre confiance)
+    const rawStageCounts = {};
+    const rawStageHitA1 = {};
+    const rawStageCmpA1 = {};
+    for (let i = 0; i < STAGE_NAMES.length; i++) {
+        const s = STAGE_NAMES[i];
+        rawStageCounts[s] = 0; rawStageHitA1[s] = 0; rawStageCmpA1[s] = 0;
+    }
+    for (const f of files) {
+        for (const p of (f.data.predictions || [])) {
+            const s = p.name;
+            if (rawStageCounts[s] !== undefined) {
+                rawStageCounts[s]++;
+                const m = p.matchA1 !== undefined ? p.matchA1 : (p.annot1 ? (p.name === p.annot1) : null);
+                if (m !== null) { rawStageCmpA1[s]++; if (m) rawStageHitA1[s]++; }
+            }
+        }
+    }
+
     const stats = {
         fileCount: files.length,
         totalEpochs: n,
@@ -238,6 +257,10 @@ function cmpComputeSideStats(files, threshold) {
         perStageKappa: {},
         metrics: {},
         confusion: null,
+        stageCountsRaw: {},       // epochs par stade predit AVANT filtre confiance
+        perStageDetailRaw: {},    // hitA1/cmpA1 par stade predit AVANT filtre confiance
+        ece: null,                // Expected Calibration Error (0=parfait, 1=catastrophique)
+        eceBins: null,            // detail par tranche de confiance
     };
 
     // Index rapide : stage name -> indice
@@ -270,9 +293,6 @@ function cmpComputeSideStats(files, threshold) {
     // Confusion matrix + kappa accumulateurs
     const cm = STAGE_NAMES.map(() => new Array(NC).fill(0));
     let kappaIA1_cnt = 0, kappaIA2_cnt = 0;
-    let a1a2_agree = 0, a1a2_cnt = 0;
-    const a1a2_cntA1 = new Array(NC).fill(0);
-    const a1a2_cntA2 = new Array(NC).fill(0);
 
     // Binary kappa accumulateurs par stade
     const bkTotal = new Array(NC).fill(0);
@@ -308,7 +328,7 @@ function cmpComputeSideStats(files, threshold) {
             if (hasA1 && hasA2 && !p.matchA1 && !p.matchA2) d.wrongBoth++;
         }
 
-        // Precision par stade (vs A1 / A2)
+        // Accumulateurs recall par stade annote (utilises par d'autres stats)
         if (a1i >= 0) { stTotalA1[a1i]++; if (p.matchA1) stHitA1[a1i]++; }
         if (a2i >= 0) { stTotalA2[a2i]++; if (p.matchA2) stHitA2[a2i]++; }
 
@@ -323,14 +343,6 @@ function cmpComputeSideStats(files, threshold) {
         if (a2i >= 0 && pi !== undefined) {
             stCntA2[a2i]++;
             kappaIA2_cnt++;
-        }
-
-        // Kappa A1 vs A2
-        if (a1i >= 0 && a2i >= 0) {
-            a1a2_cnt++;
-            if (a1i === a2i) a1a2_agree++;
-            a1a2_cntA1[a1i]++;
-            a1a2_cntA2[a2i]++;
         }
 
         // Binary kappa par stade
@@ -358,20 +370,21 @@ function cmpComputeSideStats(files, threshold) {
         stats.stagePercents[s] = stCntPred[i] / n * 100;
     }
 
-    // ---- Correction isotonique: garantir la monotonie du seuil de confiance ----
-    // Pour chaque stade, trier les predictions par confiance decroissante,
-    // calculer l'accuracy cumulee, puis appliquer une correction isotonique
-    // (running max de droite a gauche) pour que l'accuracy ne diminue jamais
-    // quand le seuil de confiance augmente.
-    function isotonicPerStageAcc(files, annotKey, matchKey) {
+    // ---- Precision par stade avec correction isotonique ----
+    // Vraie precision ML : parmi les predictions que l'IA appelle "stade X",
+    // combien sont reellement "stade X" selon l'annotateur ?
+    // precision = TP / (TP + FP), regroupe par stade PREDIT (pas annote).
+    // Correction isotonique (running max droite->gauche) pour garantir
+    // la monotonie : seuil plus haut → precision egale ou meilleure.
+    function isotonicPerStagePrecision(files, annotKey, matchKey) {
         const result = {};
         for (let i = 0; i < NC; i++) {
             const s = STAGE_NAMES[i];
-            // Collecter TOUTES les predictions de ce stade annote (sans filtre)
+            // Collecter TOUTES les predictions dont le stade PREDIT == s
             const stagePreds = [];
             for (const f of files) {
                 for (const p of (f.data.predictions || [])) {
-                    if (p[annotKey] && si[p[annotKey]] === i && p[matchKey] !== null) {
+                    if (si[p.name] === i && p[matchKey] !== null) {
                         stagePreds.push({ conf: p.confidence || 0, hit: p[matchKey] ? 1 : 0 });
                     }
                 }
@@ -381,20 +394,18 @@ function cmpComputeSideStats(files, threshold) {
             // Trier par confiance decroissante
             stagePreds.sort((a, b) => b.conf - a.conf);
 
-            // Accuracy cumulee du top (haute confiance) vers le bas
+            // Precision cumulee du top (haute confiance) vers le bas
             let cumHit = 0, cumTotal = 0;
-            const cumAcc = new Array(stagePreds.length);
+            const cumPrec = new Array(stagePreds.length);
             for (let k = 0; k < stagePreds.length; k++) {
                 cumTotal++;
                 cumHit += stagePreds[k].hit;
-                cumAcc[k] = cumHit / cumTotal;
+                cumPrec[k] = cumHit / cumTotal;
             }
 
             // Correction isotonique: running max de droite a gauche
-            // Garantit: cumAcc[k] >= cumAcc[k+1] pour tout k
-            // Donc: seuil plus haut → accuracy plus haute (ou egale)
-            for (let k = cumAcc.length - 2; k >= 0; k--) {
-                cumAcc[k] = Math.max(cumAcc[k], cumAcc[k + 1]);
+            for (let k = cumPrec.length - 2; k >= 0; k--) {
+                cumPrec[k] = Math.max(cumPrec[k], cumPrec[k + 1]);
             }
 
             // Trouver l'index correspondant au seuil courant
@@ -403,13 +414,13 @@ function cmpComputeSideStats(files, threshold) {
                 if (stagePreds[k].conf >= threshold) lastIdx = k;
                 else break;
             }
-            result[s] = lastIdx >= 0 ? cumAcc[lastIdx] : null;
+            result[s] = lastIdx >= 0 ? cumPrec[lastIdx] : null;
         }
         return result;
     }
 
-    const isoA1 = isotonicPerStageAcc(files, 'annot1', 'matchA1');
-    const isoA2 = isotonicPerStageAcc(files, 'annot2', 'matchA2');
+    const isoA1 = isotonicPerStagePrecision(files, 'annot1', 'matchA1');
+    const isoA2 = isotonicPerStagePrecision(files, 'annot2', 'matchA2');
     for (let i = 0; i < NC; i++) {
         const s = STAGE_NAMES[i];
         stats.perStageAccA1[s] = isoA1[s];
@@ -459,14 +470,32 @@ function cmpComputeSideStats(files, threshold) {
         stats.kappaIA_A2 = pe >= 1 ? po : (po - pe) / (1 - pe);
     }
 
-    // Kappa A1 vs A2
-    if (a1a2_cnt > 0) {
-        const po = a1a2_agree / a1a2_cnt;
-        let pe = 0;
-        for (let i = 0; i < NC; i++) {
-            pe += (a1a2_cntA1[i] / a1a2_cnt) * (a1a2_cntA2[i] / a1a2_cnt);
+    // Kappa A1 vs A2 — calcule sur TOUTES les epochs (sans filtre de confiance)
+    // car les annotations humaines ne dependent pas du seuil de confiance de l'IA
+    {
+        let rawAgree = 0, rawCnt = 0;
+        const rawCntA1 = new Array(NC).fill(0);
+        const rawCntA2 = new Array(NC).fill(0);
+        for (const f of files) {
+            for (const p of (f.data.predictions || [])) {
+                const ra1 = p.annot1 ? si[p.annot1] : -1;
+                const ra2 = p.annot2 ? si[p.annot2] : -1;
+                if (ra1 >= 0 && ra2 >= 0) {
+                    rawCnt++;
+                    if (ra1 === ra2) rawAgree++;
+                    rawCntA1[ra1]++;
+                    rawCntA2[ra2]++;
+                }
+            }
         }
-        stats.kappaA1_A2 = pe >= 1 ? po : (po - pe) / (1 - pe);
+        if (rawCnt > 0) {
+            const po = rawAgree / rawCnt;
+            let pe = 0;
+            for (let i = 0; i < NC; i++) {
+                pe += (rawCntA1[i] / rawCnt) * (rawCntA2[i] / rawCnt);
+            }
+            stats.kappaA1_A2 = pe >= 1 ? po : (po - pe) / (1 - pe);
+        }
     }
 
     // Per-stage kappa (binary)
@@ -494,6 +523,77 @@ function cmpComputeSideStats(files, threshold) {
     }
 
     stats.confusion = cm;
+    stats.stageCountsRaw = rawStageCounts;
+    for (const s of STAGE_NAMES) {
+        stats.perStageDetailRaw[s] = { hitA1: rawStageHitA1[s], cmpA1: rawStageCmpA1[s] };
+    }
+
+    // ---- ECE (Expected Calibration Error) ----
+    // Decoupe les predictions en 10 tranches de confiance (0-10%, 10-20%, ... 90-100%)
+    // Pour chaque tranche : compare la confiance moyenne annoncee vs le % reel de bonnes reponses.
+    // ECE = somme ponderee des ecarts |confiance_moyenne - accuracy_reelle| par tranche.
+    // Un modele bien calibre : quand il dit 80%, il a raison 80% du temps → ECE ≈ 0.
+    // Un modele surconfiant : dit 90% mais a raison 50% → ECE eleve.
+    {
+        const NB = 10; // nombre de tranches
+        const bins = [];
+        for (let b = 0; b < NB; b++) bins.push({ sumConf: 0, hits: 0, total: 0 });
+        for (let i = 0; i < n; i++) {
+            const p = preds[i];
+            if (p.matchA1 === null) continue;
+            const conf = p.confidence || 0;
+            const b = Math.min(Math.floor(conf * NB), NB - 1);
+            bins[b].total++;
+            bins[b].sumConf += conf;
+            if (p.matchA1) bins[b].hits++;
+        }
+        let ece = 0, eceTotal = 0;
+        const eceBins = [];
+        for (let b = 0; b < NB; b++) {
+            const bin = bins[b];
+            if (bin.total === 0) { eceBins.push(null); continue; }
+            const avgConf = bin.sumConf / bin.total;
+            const acc = bin.hits / bin.total;
+            const gap = Math.abs(avgConf - acc);
+            ece += gap * bin.total;
+            eceTotal += bin.total;
+            eceBins.push({ range: (b * 10) + '-' + ((b + 1) * 10) + '%',
+                avgConf: avgConf, acc: acc, gap: gap, count: bin.total });
+        }
+        stats.ece = eceTotal > 0 ? ece / eceTotal : 0;
+        stats.eceBins = eceBins;
+    }
+
+    // ---- Profil de confiance sur donnees BRUTES (avant filtre seuil) ----
+    // Percentile 5 = confiance plancher (95% des predictions sont au-dessus)
+    // % basse confiance = fraction des predictions < 30%
+    // Un bon modele a un plancher eleve et peu de predictions basse confiance.
+    {
+        const allConfs = [];
+        for (const f of files) {
+            for (const p of (f.data.predictions || [])) {
+                allConfs.push(p.confidence || 0);
+            }
+        }
+        if (allConfs.length > 0) {
+            allConfs.sort(function(a, b) { return a - b; });
+            const p5idx = Math.floor(allConfs.length * 0.05);
+            stats.confP5 = allConfs[p5idx];
+            stats.confP25 = allConfs[Math.floor(allConfs.length * 0.25)];
+            stats.confMedian = allConfs[Math.floor(allConfs.length * 0.5)];
+            let lowCount = 0;
+            for (let i = 0; i < allConfs.length; i++) {
+                if (allConfs[i] < 0.3) lowCount++;
+            }
+            stats.confLowPct = lowCount / allConfs.length;
+        } else {
+            stats.confP5 = 0;
+            stats.confP25 = 0;
+            stats.confMedian = 0;
+            stats.confLowPct = 1;
+        }
+    }
+
     return stats;
 }
 
@@ -612,8 +712,177 @@ function cmpRenderDistrib(sA, sB, nameA, nameB) {
     const el = document.getElementById('cmpDistribDual');
     if (!el) return;
 
-    function side(s, other, name) {
-        let html = '<div class="cmp-side"><h3>' + name + '</h3><div class="stats-grid cmp-stats-grid">';
+    // --- Score composite multi-criteres ---
+    // 7 axes, chacun note sur 100, pondere puis moyenne = score final
+    //
+    // 1. Bonnes reponses (20%) : accuracy vs A1
+    // 2. Calibration confiance (15%) : ECE par tranche, la confiance est-elle justifiee ?
+    // 3. Profil de confiance (10%) : le modele est-il sur de lui ? (plancher eleve, peu de basse confiance)
+    // 4. Retention (15%) : epochs gardees / epochs brutes au seuil actuel
+    // 5. Fiabilite (15%) : 1 - taux de faux positifs (wrongBoth / total)
+    // 6. Distribution realiste (15%) : similarite avec la litterature PSG adulte
+    // 7. Couverture des stades (10%) : detecte-t-il les 5 stades ?
+    function computeCompositeScore(s) {
+        const details = [];
+
+        // 1. Bonnes reponses (accuracy vs A1)
+        const accuracy = s.accA1 || 0;
+        details.push({ name: 'Bonnes r\u00e9ponses', val: accuracy * 100, weight: 20, icon: '\u2713',
+            tip: 'Pourcentage de pr\u00e9dictions correctes par rapport \u00e0 l\u2019annotateur A1. ' +
+                 'Ex : sur 1000 epochs, 750 correspondent \u00e0 A1 \u2192 75%. ' +
+                 'C\u2019est la mesure la plus directe de la qualit\u00e9 de l\u2019algorithme.' });
+
+        // 2. Calibration confiance (ECE - Expected Calibration Error)
+        // On decoupe en tranches de confiance et on verifie que dans chaque tranche
+        // le % de bonnes reponses correspond au % de confiance annonce.
+        const ece = s.ece || 0;
+        const calibScore = Math.max(0, (1 - ece * 2.5)) * 100; // ECE 0 → 100, ECE 0.4 → 0
+        // Construire le detail des pires tranches pour le tooltip
+        let calibDetail = '';
+        if (s.eceBins) {
+            const worst = s.eceBins.filter(function(b) { return b !== null; })
+                .sort(function(a, b) { return b.gap - a.gap; }).slice(0, 3);
+            for (const w of worst) {
+                calibDetail += 'Tranche ' + w.range + ' : confiance moy. ' +
+                    (w.avgConf * 100).toFixed(0) + '% vs r\u00e9alit\u00e9 ' +
+                    (w.acc * 100).toFixed(0) + '% (\u00e9cart ' + (w.gap * 100).toFixed(0) + '%, ' + w.count + ' epochs). ';
+            }
+        }
+        details.push({ name: 'Calibration confiance', val: calibScore, weight: 15, icon: '\u25CE',
+            tip: 'Mesure si la confiance du mod\u00e8le correspond \u00e0 la r\u00e9alit\u00e9, tranche par tranche (ECE). ' +
+                 'On d\u00e9coupe les pr\u00e9dictions en 10 tranches (0-10%, 10-20%, ... 90-100%) ' +
+                 'et on v\u00e9rifie que dans chaque tranche le % de bonnes r\u00e9ponses \u2248 la confiance annonc\u00e9e. ' +
+                 'Ex : si le mod\u00e8le dit 90% confiant mais n\u2019a que 50% de bonnes r\u00e9ponses dans cette tranche \u2192 surconfiant, gros \u00e9cart. ' +
+                 'ECE = ' + (ece * 100).toFixed(1) + '% (0% = parfait, 50% = catastrophique). ' +
+                 'Pires tranches : ' + calibDetail });
+
+        // 3. Profil de confiance (le modele est-il sur de lui ?)
+        // Combine : plancher de confiance (P5) + absence de basse confiance (< 30%)
+        // Un modele qui ne descend jamais sous 30% est meilleur qu'un qui hesite beaucoup.
+        const confP5 = s.confP5 || 0;
+        const confLowPct = s.confLowPct || 0;
+        // P5 normalise : 0 si P5=0, 100 si P5>=0.5 (toutes les preds >= 50%)
+        const p5Score = Math.min(confP5 / 0.5, 1);
+        // Basse confiance : 100 si 0% < 30%, 0 si 100% < 30%
+        const lowScore = 1 - confLowPct;
+        // Moyenne des deux
+        const confProfileScore = (p5Score * 0.5 + lowScore * 0.5) * 100;
+        details.push({ name: 'Profil de confiance', val: confProfileScore, weight: 10, icon: '\u25B4',
+            tip: 'Mesure si le mod\u00e8le est globalement s\u00fbr de ses pr\u00e9dictions (calcul\u00e9 sur toutes les donn\u00e9es brutes, avant filtre seuil). ' +
+                 'Deux sous-crit\u00e8res : ' +
+                 '1) Plancher de confiance (percentile 5%) = ' + (confP5 * 100).toFixed(0) + '% \u2014 95% des pr\u00e9dictions sont au-dessus de cette valeur. ' +
+                 'Plus c\u2019est haut, moins le mod\u00e8le h\u00e9site. ' +
+                 '2) Pr\u00e9dictions basse confiance (< 30%) = ' + (confLowPct * 100).toFixed(1) + '% des epochs \u2014 ' +
+                 'un bon mod\u00e8le ne devrait quasiment jamais \u00eatre en dessous de 30%. ' +
+                 'Confiance m\u00e9diane = ' + ((s.confMedian || 0) * 100).toFixed(0) + '%, P25 = ' + ((s.confP25 || 0) * 100).toFixed(0) + '%.' });
+
+        // 4. Retention (volume)
+        const retention = s.totalEpochsRaw > 0 ? s.totalEpochs / s.totalEpochsRaw : 0;
+        details.push({ name: 'R\u00e9tention au seuil', val: retention * 100, weight: 15, icon: '\u25A3',
+            tip: 'Quel pourcentage des epochs brutes passe le seuil de confiance actuel ? ' +
+                 'Ici : ' + s.totalEpochs + ' epochs gard\u00e9es sur ' + s.totalEpochsRaw + ' brutes (' + (retention * 100).toFixed(0) + '%). ' +
+                 'Un algo qui filtre trop d\u2019epochs (m\u00eame avec 100% de bonnes r\u00e9ponses) est p\u00e9nalis\u00e9 car il \u00AB refuse \u00BB de se prononcer.' });
+
+        // 5. Fiabilite (pas de faux positifs)
+        let totalWrongBoth = 0, totalCnt = 0;
+        for (const stage of STAGE_NAMES) {
+            const d = s.perStageDetail[stage];
+            totalWrongBoth += d.wrongBoth;
+            totalCnt += d.count;
+        }
+        const reliability = totalCnt > 0 ? (totalCnt - totalWrongBoth) / totalCnt : 0;
+        details.push({ name: 'Fiabilit\u00e9 (accord annot.)', val: reliability * 100, weight: 15, icon: '\u2691',
+            tip: 'Pourcentage d\u2019epochs o\u00f9 au moins un annotateur est d\u2019accord avec l\u2019IA. ' +
+                 'Ici : ' + totalWrongBoth + ' epochs sur ' + totalCnt + ' o\u00f9 NI A1 NI A2 ne sont d\u2019accord avec la pr\u00e9diction (faux positifs certains). ' +
+                 'Moins il y a de faux positifs, plus le score est \u00e9lev\u00e9.' });
+
+        // 6. Distribution realiste vs litterature PSG adulte
+        const expected = { 'Wake': 5, 'N1': 5, 'N2': 50, 'N3': 17, 'REM': 23 };
+        let devSum = 0;
+        let distribDetail = '';
+        for (const stage of STAGE_NAMES) {
+            const obs = s.stagePercents[stage] || 0;
+            const exp = expected[stage] || 0;
+            devSum += Math.abs(obs - exp);
+            distribDetail += stage + ': ' + obs.toFixed(0) + '% (attendu ~' + exp + '%) | ';
+        }
+        const distribSim = Math.max(0, 1 - devSum / 100);
+        details.push({ name: 'Distribution (vs litt\u00e9rature)', val: distribSim * 100, weight: 15, icon: '\u2261',
+            tip: 'Compare la r\u00e9partition des stades d\u00e9tect\u00e9s avec les proportions typiques d\u2019un adulte en PSG (polysomnographie). ' +
+                 'R\u00e9f\u00e9rence : Wake ~5%, N1 ~5%, N2 ~50%, N3 ~17%, REM ~23%. ' +
+                 distribDetail +
+                 'Un algo qui ne d\u00e9tecte que du Wake et du N2 aura un mauvais score ici.' });
+
+        // 7. Couverture des stades
+        let stagesCovered = 0;
+        const coveredList = [];
+        const missingList = [];
+        for (const stage of STAGE_NAMES) {
+            if ((s.stagePercents[stage] || 0) >= 1) { stagesCovered++; coveredList.push(stage); }
+            else { missingList.push(stage); }
+        }
+        const coverage = stagesCovered / STAGE_NAMES.length;
+        details.push({ name: 'Couverture stades', val: coverage * 100, weight: 10, icon: '\u2630',
+            tip: 'Combien des 5 stades de sommeil sont d\u00e9tect\u00e9s (>= 1% du total chacun) ? ' +
+                 'D\u00e9tect\u00e9s : ' + coveredList.join(', ') + (missingList.length ? '. Manquants : ' + missingList.join(', ') : '. Tous d\u00e9tect\u00e9s !') + '. ' +
+                 'Un bon algorithme doit identifier les 5 stades, pas seulement les plus fr\u00e9quents.' });
+
+        // Score composite pondere
+        let wSum = 0, wTotal = 0;
+        for (const d of details) {
+            wSum += d.val * d.weight;
+            wTotal += d.weight;
+        }
+        const score = wTotal > 0 ? wSum / wTotal : 0;
+
+        return { score: Math.round(score), details };
+    }
+
+    // Score par stade (effective accuracy vs raw)
+    function computeStageScores(s) {
+        const stageScores = {};
+        for (const stage of STAGE_NAMES) {
+            const rawCnt = s.stageCountsRaw[stage] || 0;
+            const d = s.perStageDetail[stage];
+            if (rawCnt === 0) { stageScores[stage] = null; continue; }
+            stageScores[stage] = (d.hitA1 || 0) / rawCnt * 100;
+        }
+        return stageScores;
+    }
+
+    const scA = computeCompositeScore(sA);
+    const scB = computeCompositeScore(sB);
+    const ssA = computeStageScores(sA);
+    const ssB = computeStageScores(sB);
+
+    function side(s, other, sc, scOther, ss, ssOther, name) {
+        const scoreColor = sc.score > scOther.score ? '#22c55e' : sc.score === scOther.score ? '#f59e0b' : '#ef4444';
+        let html = '<div class="cmp-side"><h3>' + name + '</h3>';
+
+        // --- Score global avec detail des axes ---
+        html += '<div style="margin:8px 0 12px;padding:10px;border-radius:8px;background:rgba(255,255,255,0.05)">';
+        html += '<div style="text-align:center;margin-bottom:8px;cursor:help" ' +
+            'title="Score composite bas\u00e9 sur 7 crit\u00e8res pond\u00e9r\u00e9s : bonnes r\u00e9ponses (20%), calibration confiance ECE (15%), profil de confiance (10%), r\u00e9tention au seuil (15%), fiabilit\u00e9 (15%), distribution vs litt\u00e9rature (15%) et couverture des stades (10%). Survolez chaque crit\u00e8re ci-dessous pour plus de d\u00e9tails.">' +
+            '<span style="font-size:12px;color:#9aa0a6">Score algorithme</span><br>' +
+            '<span style="font-size:32px;font-weight:700;color:' + scoreColor + '">' + sc.score + '</span>' +
+            '<span style="font-size:14px;color:#9aa0a6">/100</span></div>';
+        // Detail des 6 axes (avec tooltips explicatifs)
+        for (const d of sc.details) {
+            const val = Math.round(d.val);
+            const barColor = val >= 70 ? '#22c55e' : val >= 40 ? '#f59e0b' : '#ef4444';
+            const tip = d.tip ? ' title="' + d.tip.replace(/"/g, '&quot;') + '"' : '';
+            html += '<div style="display:flex;align-items:center;gap:6px;margin:3px 0;font-size:11px;cursor:help"' + tip + '>' +
+                '<span style="width:10px;text-align:center;color:#6b7280">' + d.icon + '</span>' +
+                '<span style="flex:1;color:#9aa0a6">' + d.name + ' <span style="color:#6b7280">(' + d.weight + '%)</span></span>' +
+                '<div style="width:50px;height:4px;border-radius:2px;background:rgba(255,255,255,0.1);overflow:hidden">' +
+                '<div style="height:100%;width:' + val + '%;background:' + barColor + ';border-radius:2px"></div></div>' +
+                '<span style="width:28px;text-align:right;color:' + barColor + ';font-weight:600">' + val + '</span>' +
+                '</div>';
+        }
+        html += '</div>';
+
+        // --- Cartes par stade ---
+        html += '<div class="stats-grid cmp-stats-grid">';
         for (const stage of STAGE_NAMES) {
             const pct = s.stagePercents[stage].toFixed(1) + '%';
             const cnt = s.stageCounts[stage] || 0;
@@ -630,6 +899,27 @@ function cmpRenderDistrib(sA, sB, nameA, nameB) {
                     errText = '<span style="font-size:11px">' + d.wrongBoth + ' err <span style="color:' + okColor + '">' + correctVal.toFixed(1) + '% ok</span></span>';
                 }
             }
+            // Barre score effectif par stade
+            const stScore = ss[stage];
+            const stScoreOther = ssOther[stage];
+            let stageScoreHtml = '';
+            if (stScore != null) {
+                const barColor = stScore >= 70 ? '#22c55e' : stScore >= 40 ? '#f59e0b' : '#ef4444';
+                const better = stScoreOther != null && stScore > stScoreOther + 1;
+                const worse = stScoreOther != null && stScore < stScoreOther - 1;
+                const indicator = better ? ' \u25B2' : worse ? ' \u25BC' : '';
+                const indicatorColor = better ? '#22c55e' : '#ef4444';
+                const rawCnt = s.stageCountsRaw[stage] || 0;
+                const hits = d.hitA1 || 0;
+                const stageTip = 'Score effectif ' + stage + ' : ' + hits + ' bonnes r\u00e9ponses (au seuil actuel) sur ' + rawCnt + ' epochs brutes = ' + Math.round(stScore) + '/100. Combine volume et qualit\u00e9 : un algo qui garde beaucoup d\u2019epochs avec un bon % de bonnes r\u00e9ponses aura un score \u00e9lev\u00e9.';
+                stageScoreHtml = '<div style="margin-top:3px;cursor:help" title="' + stageTip.replace(/"/g, '&quot;') + '">' +
+                    '<div style="display:flex;align-items:center;gap:4px">' +
+                    '<div style="flex:1;height:4px;border-radius:2px;background:rgba(255,255,255,0.1);overflow:hidden">' +
+                    '<div style="height:100%;width:' + Math.round(stScore) + '%;background:' + barColor + ';border-radius:2px"></div></div>' +
+                    '<span style="font-size:10px;color:' + barColor + '">' + Math.round(stScore) + '</span>' +
+                    (indicator ? '<span style="font-size:9px;color:' + indicatorColor + '">' + indicator + '</span>' : '') +
+                    '</div></div>';
+            }
             const durText = typeof durHtml === 'function' ? '<div class="stat-duration">' + durHtml(cnt, s.totalEpochs) + '</div>' : '';
             html += '<div class="stat-card">' +
                 '<div class="stat-label stage-' + (typeof getStageClass === 'function' ? getStageClass(stage) : stage.toLowerCase()) + '">' + stage + '</div>' +
@@ -642,12 +932,13 @@ function cmpRenderDistrib(sA, sB, nameA, nameB) {
                     '<span style="color:#3b82f6">A2 ' + sAccA2 + '</span>' +
                 '</div>' +
                 '<div>' + errText + '</div>' +
+                stageScoreHtml +
                 '</div>';
         }
         html += '</div></div>';
         return html;
     }
-    el.innerHTML = side(sA, sB, nameA) + '<div class="cmp-divider"></div>' + side(sB, sA, nameB);
+    el.innerHTML = side(sA, sB, scA, scB, ssA, ssB, nameA) + '<div class="cmp-divider"></div>' + side(sB, sA, scB, scA, ssB, ssA, nameB);
 }
 
 // ---- Per-stage accuracy ----
