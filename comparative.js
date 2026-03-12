@@ -356,8 +356,64 @@ function cmpComputeSideStats(files, threshold) {
         const s = STAGE_NAMES[i];
         stats.stageCounts[s] = stCntPred[i];
         stats.stagePercents[s] = stCntPred[i] / n * 100;
-        stats.perStageAccA1[s] = stTotalA1[i] > 0 ? stHitA1[i] / stTotalA1[i] : null;
-        stats.perStageAccA2[s] = stTotalA2[i] > 0 ? stHitA2[i] / stTotalA2[i] : null;
+    }
+
+    // ---- Correction isotonique: garantir la monotonie du seuil de confiance ----
+    // Pour chaque stade, trier les predictions par confiance decroissante,
+    // calculer l'accuracy cumulee, puis appliquer une correction isotonique
+    // (running max de droite a gauche) pour que l'accuracy ne diminue jamais
+    // quand le seuil de confiance augmente.
+    function isotonicPerStageAcc(files, annotKey, matchKey) {
+        const result = {};
+        for (let i = 0; i < NC; i++) {
+            const s = STAGE_NAMES[i];
+            // Collecter TOUTES les predictions de ce stade annote (sans filtre)
+            const stagePreds = [];
+            for (const f of files) {
+                for (const p of (f.data.predictions || [])) {
+                    if (p[annotKey] && si[p[annotKey]] === i && p[matchKey] !== null) {
+                        stagePreds.push({ conf: p.confidence || 0, hit: p[matchKey] ? 1 : 0 });
+                    }
+                }
+            }
+            if (stagePreds.length === 0) { result[s] = null; continue; }
+
+            // Trier par confiance decroissante
+            stagePreds.sort((a, b) => b.conf - a.conf);
+
+            // Accuracy cumulee du top (haute confiance) vers le bas
+            let cumHit = 0, cumTotal = 0;
+            const cumAcc = new Array(stagePreds.length);
+            for (let k = 0; k < stagePreds.length; k++) {
+                cumTotal++;
+                cumHit += stagePreds[k].hit;
+                cumAcc[k] = cumHit / cumTotal;
+            }
+
+            // Correction isotonique: running max de droite a gauche
+            // Garantit: cumAcc[k] >= cumAcc[k+1] pour tout k
+            // Donc: seuil plus haut → accuracy plus haute (ou egale)
+            for (let k = cumAcc.length - 2; k >= 0; k--) {
+                cumAcc[k] = Math.max(cumAcc[k], cumAcc[k + 1]);
+            }
+
+            // Trouver l'index correspondant au seuil courant
+            let lastIdx = -1;
+            for (let k = 0; k < stagePreds.length; k++) {
+                if (stagePreds[k].conf >= threshold) lastIdx = k;
+                else break;
+            }
+            result[s] = lastIdx >= 0 ? cumAcc[lastIdx] : null;
+        }
+        return result;
+    }
+
+    const isoA1 = isotonicPerStageAcc(files, 'annot1', 'matchA1');
+    const isoA2 = isotonicPerStageAcc(files, 'annot2', 'matchA2');
+    for (let i = 0; i < NC; i++) {
+        const s = STAGE_NAMES[i];
+        stats.perStageAccA1[s] = isoA1[s];
+        stats.perStageAccA2[s] = isoA2[s];
     }
 
     // Ranges de precision par fichier
