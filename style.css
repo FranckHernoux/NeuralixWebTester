@@ -688,6 +688,11 @@ td.cell-bg-pending {
     color: var(--text-muted);
     margin: 0 3px;
 }
+.epochs-timeout {
+    color: #ef4444;
+    font-size: 14px;
+    font-weight: 600;
+}
 .stat-accord {
     font-size: 11px;
     margin-top: 4px;

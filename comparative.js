@@ -861,12 +861,34 @@ function cmpRenderDistrib(sA, sB, nameA, nameB) {
 
         // --- Score global avec detail des axes ---
         html += '<div style="margin:8px 0 12px;padding:10px;border-radius:8px;background:rgba(255,255,255,0.05)">';
-        html += '<div style="text-align:center;margin-bottom:8px;cursor:help" ' +
-            'title="Score composite bas\u00e9 sur 7 crit\u00e8res pond\u00e9r\u00e9s : bonnes r\u00e9ponses (20%), calibration confiance ECE (15%), profil de confiance (10%), r\u00e9tention au seuil (15%), fiabilit\u00e9 (15%), distribution vs litt\u00e9rature (15%) et couverture des stades (10%). Survolez chaque crit\u00e8re ci-dessous pour plus de d\u00e9tails.">' +
+        html += '<div style="display:flex;justify-content:center;align-items:center;gap:0;margin-bottom:8px">' +
+            '<div style="text-align:center;padding-right:20px;cursor:help" ' +
+            'title="Score composite bas\u00e9 sur 7 crit\u00e8res pond\u00e9r\u00e9s : bonnes r\u00e9ponses (20%), calibration confiance ECE (15%), profil de confiance (10%), r\u00e9tention au seuil (15%), fiabilit\u00e9 (15%), distribution vs litt\u00e9rature (15%) et couverture des stades (10%).">' +
             '<span style="font-size:12px;color:#9aa0a6">Score algorithme</span><br>' +
             '<span style="font-size:32px;font-weight:700;color:' + scoreColor + '">' + sc.score + '</span>' +
-            '<span style="font-size:14px;color:#9aa0a6">/100</span></div>';
-        // Detail des 6 axes (avec tooltips explicatifs)
+            '<span style="font-size:14px;color:#9aa0a6">/100</span>' +
+            '</div>' +
+            '<div style="width:1px;height:40px;background:#4b5563;margin:0 4px"></div>' +
+            (function() {
+                var met = s.metrics;
+                if (!met) return '';
+                var sum = 0, cnt = 0;
+                for (var st of STAGE_NAMES) { if (met[st]) { sum += met[st].f1; cnt++; } }
+                if (cnt === 0) return '';
+                var f1m = sum / cnt * 100;
+                var f1c = f1m >= 70 ? '#22c55e' : f1m >= 40 ? '#f59e0b' : '#ef4444';
+                return '<div style="text-align:center;padding-left:20px;cursor:help" title="F1 Macro = moyenne des F1 par stade. Combine pr\u00e9cision et recall pour chaque stade, p\u00e9nalise les faux positifs ET les faux n\u00e9gatifs.">' +
+                    '<span style="font-size:12px;color:#9aa0a6">F1 Macro</span><br>' +
+                    '<span style="font-size:32px;font-weight:700;color:' + f1c + '">' + f1m.toFixed(1) + '</span>' +
+                    '<span style="font-size:14px;color:#9aa0a6">%</span>' +
+                    '</div>';
+            })() +
+            '</div>';
+        // Detail des 6 axes (collapsible)
+        html += '<div style="margin-top:4px">' +
+            '<div class="cmp-criteria-toggle" style="cursor:pointer;font-size:11px;color:#6b7280;user-select:none" onclick="var els=document.querySelectorAll(\'.cmp-criteria-body\');var arrs=document.querySelectorAll(\'.cmp-criteria-toggle span\');var show=els[0]&&els[0].style.display===\'none\';els.forEach(function(el){el.style.display=show?\'block\':\'none\';});arrs.forEach(function(a){a.textContent=show?\'\u25BC\':\'\u25B6\';});">' +
+            '<span>\u25B6</span> D\u00e9tail des crit\u00e8res</div>' +
+            '<div class="cmp-criteria-body" style="display:none">';
         for (const d of sc.details) {
             const val = Math.round(d.val);
             const barColor = val >= 70 ? '#22c55e' : val >= 40 ? '#f59e0b' : '#ef4444';
@@ -879,6 +901,7 @@ function cmpRenderDistrib(sA, sB, nameA, nameB) {
                 '<span style="width:28px;text-align:right;color:' + barColor + ';font-weight:600">' + val + '</span>' +
                 '</div>';
         }
+        html += '</div></div>';
         html += '</div>';
 
         // --- Cartes par stade ---
@@ -932,6 +955,14 @@ function cmpRenderDistrib(sA, sB, nameA, nameB) {
                     '<span style="color:#3b82f6">A2 ' + sAccA2 + '</span>' +
                 '</div>' +
                 '<div>' + errText + '</div>' +
+                (function() {
+                    var m = s.metrics && s.metrics[stage];
+                    if (!m) return '';
+                    var f1val = (m.f1 * 100).toFixed(1);
+                    var f1color = m.f1 >= 0.7 ? '#22c55e' : m.f1 >= 0.4 ? '#f59e0b' : '#ef4444';
+                    return '<div style="font-size:11px;margin-top:2px;cursor:help" title="F1 = 2\u00d7Pr\u00e9cision\u00d7Recall/(Pr\u00e9cision+Recall). Pr\u00e9c=' + (m.precision*100).toFixed(1) + '% Recall=' + (m.recall*100).toFixed(1) + '%">' +
+                        'F1 : <span style="color:' + f1color + ';font-weight:bold">' + f1val + '%</span></div>';
+                })() +
                 stageScoreHtml +
                 '</div>';
         }

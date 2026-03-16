@@ -336,6 +336,8 @@ const state = {
     matchesA2: 0,
     totalCompared: 0,
     totalTimeMs: 0,
+    epochsProcessed: 0,    // Epochs envoyees (reussies + timeouts)
+    epochsTimeout: 0,      // Epochs en timeout (sans reponse)
 
     // Filtres
     statsFilter: 'all',           // cle dans STATS_FILTERS
@@ -362,6 +364,12 @@ const state = {
     rxBuffer: '',
     waitingForPrediction: false,
     predictionResolve: null,
+
+    // Mutex writer serie (evite les acces concurrents au WritableStream)
+    writerBusy: false,
+
+    // Promise de fermeture du stream de lecture (pour deconnexion propre)
+    readableStreamClosed: null,
 };
 
 // ============================================================================
@@ -455,6 +463,8 @@ function _buildPredData() {
         matchesA2: state.matchesA2,
         totalCompared: state.totalCompared,
         totalTimeMs: state.totalTimeMs,
+        epochsProcessed: state.epochsProcessed,
+        epochsTimeout: state.epochsTimeout,
         currentEpoch: state.currentEpoch,
         currentEpochData: Array.from(state.currentEpochData || []),
     };
@@ -577,6 +587,8 @@ async function restoreFromStorage() {
             state.matchesA2 = pred.matchesA2 || 0;
             state.totalCompared = pred.totalCompared || 0;
             state.totalTimeMs = pred.totalTimeMs || 0;
+            state.epochsProcessed = pred.epochsProcessed || 0;
+            state.epochsTimeout = pred.epochsTimeout || 0;
             for (const r of state.predictions) {
                 if (r.matchA1 === undefined) r.matchA1 = r.annot1 ? (r.name === r.annot1) : null;
                 if (r.matchA2 === undefined) r.matchA2 = r.annot2 ? (r.name === r.annot2) : null;
@@ -734,14 +746,24 @@ async function connectSerial() {
         return;
     }
 
+    // Si deja connecte (etat residuel), forcer la deconnexion d'abord
+    if (state.port) {
+        await disconnectSerial();
+        await sleep(300);
+    }
+
     try {
         state.port = await navigator.serial.requestPort();
         await state.port.open({ baudRate: 115200 });
 
         state.connected = true;
+        state.writerBusy = false;
         updateConnectionUI(true);
         updateControls();
         log('Port serie connecte', 'info');
+
+        // Ecouter la deconnexion USB
+        navigator.serial.addEventListener('disconnect', onSerialDisconnect);
 
         // Demarrer la lecture
         startReading();
@@ -754,33 +776,81 @@ async function connectSerial() {
     }
 }
 
+function onSerialDisconnect(event) {
+    // Verifier que c'est bien notre port qui a ete debranche
+    if (event.target === state.port || !state.port) {
+        log('ESP32 debranche !', 'error');
+        state.running = false;
+        state.connected = false;
+        state.writerBusy = false;
+        state.waitingForPrediction = false;
+        if (state.predictionResolve) {
+            state.predictionResolve(null);
+        }
+        state.predictionResolve = null;
+        state.reader = null;
+        state.readableStreamClosed = null;
+        state.port = null;
+        updateConnectionUI(false);
+        updateControls();
+    }
+}
+
 async function disconnectSerial() {
     try {
+        // 1. Arreter le streaming en cours
         state.running = false;
+        state.connected = false;
+        state.writerBusy = false;
 
+        // Resoudre toute prediction en attente
+        if (state.predictionResolve) {
+            state.predictionResolve(null);
+        }
+        state.waitingForPrediction = false;
+        state.predictionResolve = null;
+
+        // 2. Fermer le reader (ce qui annule aussi le pipeTo)
         if (state.reader) {
-            await state.reader.cancel();
+            try {
+                await state.reader.cancel();
+            } catch (_) {}
             state.reader = null;
         }
 
-        if (state.writer) {
-            state.writer.releaseLock();
-            state.writer = null;
+        // 3. Attendre que le pipeTo se termine (il se resout quand le reader est annule)
+        if (state.readableStreamClosed) {
+            try {
+                await state.readableStreamClosed.catch(() => {});
+            } catch (_) {}
+            state.readableStreamClosed = null;
         }
 
+        // 4. Fermer le port
         if (state.port) {
-            await state.port.close();
+            try {
+                await state.port.close();
+            } catch (_) {}
             state.port = null;
         }
 
-        state.connected = false;
+        // Retirer le listener de deconnexion
+        try {
+            navigator.serial.removeEventListener('disconnect', onSerialDisconnect);
+        } catch (_) {}
+
         updateConnectionUI(false);
         updateControls();
         log('Deconnecte', 'info');
 
     } catch (err) {
         log(`Erreur deconnexion: ${err.message}`, 'error');
+        // Forcer le nettoyage
         state.connected = false;
+        state.reader = null;
+        state.readableStreamClosed = null;
+        state.port = null;
+        state.writerBusy = false;
         updateConnectionUI(false);
         updateControls();
     }
@@ -788,7 +858,8 @@ async function disconnectSerial() {
 
 async function startReading() {
     const decoder = new TextDecoderStream();
-    const readableStreamClosed = state.port.readable.pipeTo(decoder.writable);
+    // Stocker la promise pipeTo pour pouvoir la fermer proprement a la deconnexion
+    state.readableStreamClosed = state.port.readable.pipeTo(decoder.writable);
     state.reader = decoder.readable.getReader();
 
     try {
@@ -803,6 +874,17 @@ async function startReading() {
         if (state.connected) {
             log(`Erreur lecture: ${err.message}`, 'error');
         }
+    }
+
+    // Si on sort de la boucle de lecture (debranchement USB, erreur...)
+    // et qu'on est encore "connecte", declencher la deconnexion
+    if (state.connected) {
+        log('Connexion serie perdue', 'error');
+        state.connected = false;
+        state.writerBusy = false;
+        state.running = false;
+        updateConnectionUI(false);
+        updateControls();
     }
 }
 
@@ -861,12 +943,38 @@ function processReceivedData(data) {
         } else if (trimmed.startsWith('@DBG:')) {
             log(`DBG: ${trimmed.substring(5)}`, 'recv');
         } else if (trimmed.startsWith('@INFO:')) {
-            log(`ESP32: ${trimmed.substring(6)}`, 'recv');
+            const infoStr = trimmed.substring(6);
+            log(`ESP32: ${infoStr}`, 'recv');
+            if (state.onStatusResponse) {
+                state.onStatusResponse(infoStr);
+            }
         } else if (trimmed.startsWith('[')) {
             // Messages de log ESP32 standards
             log(`ESP32: ${trimmed}`, 'recv');
         }
     }
+}
+
+async function acquireWriter() {
+    if (!state.connected || !state.port?.writable) {
+        throw new Error('Port non connecte');
+    }
+    // Attendre que le writer soit libre (max 5s)
+    const t0 = performance.now();
+    while (state.writerBusy) {
+        if (!state.connected) throw new Error('Deconnecte pendant l\'attente du writer');
+        if (performance.now() - t0 > 5000) {
+            throw new Error('Writer lock timeout (5s)');
+        }
+        await sleep(10);
+    }
+    state.writerBusy = true;
+    return state.port.writable.getWriter();
+}
+
+function releaseWriter(writer) {
+    try { writer.releaseLock(); } catch (_) {}
+    state.writerBusy = false;
 }
 
 async function sendCommand(cmd) {
@@ -916,9 +1024,8 @@ async function sendData(values, speed) {
     let sentCount = 0;
     const t0 = performance.now();
 
-    let writer = null;
     try {
-        writer = state.port.writable.getWriter();
+        const writer = state.port.writable.getWriter();
         const encoder = new TextEncoder();
 
         for (let i = 0; i < values.length; i += BATCH_SIZE) {
@@ -936,14 +1043,16 @@ async function sendData(values, speed) {
             // Attendre la duree correspondant a la cadence choisie
             if (batchDelayMs > 0 && i + BATCH_SIZE < values.length) {
                 await sleep(batchDelayMs);
+            } else if (i + BATCH_SIZE < values.length) {
+                // Petit delai pour laisser le buffer USB CDC digerer
+                // (setTimeout(0) ne suffit pas toujours, des samples peuvent etre perdus)
+                await new Promise(r => setTimeout(r, 2));
             }
         }
+
+        writer.releaseLock();
     } catch (err) {
         log(`Erreur envoi donnees: ${err.message}`, 'error');
-    } finally {
-        if (writer) {
-            try { writer.releaseLock(); } catch (_) {}
-        }
     }
 }
 
@@ -1199,6 +1308,8 @@ async function startStreaming() {
     state.matchesA2 = 0;
     state.totalCompared = 0;
     state.totalTimeMs = 0;
+    state.epochsProcessed = 0;
+    state.epochsTimeout = 0;
 
     savePredictionsToIDB();
     updateControls();
@@ -1266,13 +1377,28 @@ async function startStreaming() {
         // speed est passe explicitement pour que sendData applique la cadence correcte
         const prediction = await sendEpochAndWaitPrediction(epoch.eogData, state.speed);
 
+        state.epochsProcessed++;
+
         if (prediction) {
             processPredictionResult(epoch.index, prediction);
         } else {
-            // Timeout: garder la ligne dans l'historique, marquer comme non recu
-            finalizeTimeoutRow();
-            drawHypnogram();
+            // Timeout: le @PRED est probablement coince dans le buffer TX USB de l'ESP32.
+            // Envoyer un "ping" (#STATUS) pour forcer du trafic USB et debloquer le TX.
+            log('Timeout — tentative de recuperation...', 'info');
+
+            const recovered = await recoverLatePrediction();
+            if (recovered) {
+                log(`Recupere: ${recovered.name} (${(recovered.confidence * 100).toFixed(1)}%) [${recovered.time_ms}ms]`, 'pred');
+                processPredictionResult(epoch.index, recovered);
+            } else {
+                state.epochsTimeout++;
+                finalizeTimeoutRow();
+                drawHypnogram();
+            }
         }
+
+        // Mettre a jour le compteur epochs traitees / totales
+        updateEpochsProcessedUI();
 
         updateConnectionUI(true, false); // Connected status
         // Pas de delai supplementaire : sendData cadence deja l'envoi selon state.speed,
@@ -1285,12 +1411,14 @@ async function startStreaming() {
 
     if (state.running) {
         log('=== Streaming termine ===', 'info');
-        log(`Resultats: ${state.predictions.length} predictions sur ${epochCount} epochs`, 'info');
+        log(`Resultats: ${state.predictions.length} predictions sur ${epochCount} epochs` +
+            (state.epochsTimeout > 0 ? ` (${state.epochsTimeout} timeout)` : ''), 'info');
         if (state.totalCompared > 0) {
             log(`Précision A1: ${(state.matchesA1/state.totalCompared*100).toFixed(1)}%`, 'info');
             log(`Précision A2: ${(state.matchesA2/state.totalCompared*100).toFixed(1)}%`, 'info');
         }
     }
+    updateEpochsProcessedUI();
 
     state.running = false;
     updateControls();
@@ -1298,48 +1426,122 @@ async function startStreaming() {
 }
 
 async function sendEpochAndWaitPrediction(epochData, speed) {
-    return new Promise(async (resolve) => {
-        let resolved = false;
+    // 1. Preparer le callback et le timeout AVANT d'envoyer
+    //    (si une prediction retardataire arrive pendant sendData, elle est captee)
+    state.waitingForPrediction = true;
+    let done = false;
+    let timeoutId;
 
-        // Timeout adaptatif :
-        //   temps d'envoi estime + 30s marge pour la CNN (en cas de charge)
-        const sendTimeMs = (speed > 0)
-            ? Math.ceil(CHUNK_SIZE / (speed * SAMPLE_RATE)) * 1000
-            : 5000; // 115200 baud max: ~3.3s d'envoi reel (38 KB), 5s de securite
-        const timeoutMs = sendTimeMs + 30000;
-
-        const timeout = setTimeout(() => {
-            if (!resolved) {
-                resolved = true;
-                state.waitingForPrediction = false;
-                state.predictionResolve = null;
-                log(`Timeout: pas de prediction recue en ${(timeoutMs/1000).toFixed(0)}s`, 'error');
-                resolve(null);
-            }
-        }, timeoutMs);
-
-        // Installer le callback AVANT d'envoyer les donnees
-        // pour que toute prediction recue pendant sendData soit correctement traitee
-        state.waitingForPrediction = true;
+    const waitPromise = new Promise((resolve) => {
         state.predictionResolve = (pred) => {
-            if (!resolved) {
-                resolved = true;
-                clearTimeout(timeout);
+            if (!done) {
+                done = true;
+                clearTimeout(timeoutId);
                 state.waitingForPrediction = false;
                 state.predictionResolve = null;
                 resolve(pred);
             }
         };
 
-        // Envoyer les donnees avec la cadence choisie
-        await sendData(epochData, speed);
+        const timeoutMs = 35000;
+        timeoutId = setTimeout(() => {
+            if (!done) {
+                done = true;
+                state.waitingForPrediction = false;
+                state.predictionResolve = null;
+                log(`Timeout: pas de prediction recue en ${(timeoutMs/1000).toFixed(0)}s`, 'error');
+                resolve(null);
+            }
+        }, timeoutMs);
     });
+
+    // 2. Envoyer les donnees — TOUJOURS attendu jusqu'au bout
+    //    Le writer est garanti libere quand sendData retourne
+    await sendData(epochData, speed);
+
+    // 3. Attendre la prediction (ou le timeout)
+    return waitPromise;
 }
 
 function handlePrediction(pred) {
     if (state.predictionResolve) {
         state.predictionResolve(pred);
     }
+}
+
+/**
+ * Apres un timeout, tente de recuperer la prediction coincee dans le buffer TX USB.
+ * Envoie un #STATUS pour forcer du trafic USB bidirectionnel, puis attend 3s max.
+ * Si le STATUS revele des samples incomplets, envoie #RESET pour remettre l'ESP32
+ * en etat propre (sinon elle resterait bloquee a attendre les samples manquants).
+ */
+async function recoverLatePrediction() {
+    return new Promise((resolve) => {
+        let done = false;
+        let statusChecked = false;
+
+        // Installer un callback temporaire pour capter le @PRED en retard
+        state.waitingForPrediction = true;
+        state.predictionResolve = (pred) => {
+            if (!done) {
+                done = true;
+                state.waitingForPrediction = false;
+                state.predictionResolve = null;
+                state.onStatusResponse = null;
+                resolve(pred);
+            }
+        };
+
+        // Callback pour analyser la reponse STATUS
+        state.onStatusResponse = (infoStr) => {
+            if (statusChecked) return;
+            statusChecked = true;
+            // Parser samples=N/M
+            const match = infoStr.match(/samples=(\d+)\/(\d+)/);
+            if (match) {
+                const received = parseInt(match[1]);
+                const expected = parseInt(match[2]);
+                if (received < expected) {
+                    // Samples incomplets — l'ESP32 attend encore des donnees
+                    // On envoie #RESET pour la debloquer
+                    log(`Samples incomplets: ${received}/${expected} — reset ESP32`, 'error');
+                    try {
+                        const writer = state.port.writable.getWriter();
+                        writer.write(new TextEncoder().encode('#RESET\n')).then(() => {
+                            writer.releaseLock();
+                        }).catch(() => { try { writer.releaseLock(); } catch(_){} });
+                    } catch (_) {}
+                    // Pas de @PRED a recuperer, resoudre immediatement
+                    if (!done) {
+                        done = true;
+                        state.waitingForPrediction = false;
+                        state.predictionResolve = null;
+                        state.onStatusResponse = null;
+                        resolve(null);
+                    }
+                }
+            }
+        };
+
+        // Envoyer un #STATUS pour generer du trafic USB et diagnostiquer
+        try {
+            const writer = state.port.writable.getWriter();
+            writer.write(new TextEncoder().encode('#STATUS\n')).then(() => {
+                writer.releaseLock();
+            }).catch(() => { try { writer.releaseLock(); } catch(_){} });
+        } catch (_) {}
+
+        // Attendre max 3s pour la prediction en retard
+        setTimeout(() => {
+            if (!done) {
+                done = true;
+                state.waitingForPrediction = false;
+                state.predictionResolve = null;
+                state.onStatusResponse = null;
+                resolve(null);
+            }
+        }, 3000);
+    });
 }
 
 function showPendingEpoch(epoch) {
@@ -1484,6 +1686,18 @@ function updateSendingProgress(count, total) {
     const pct = (count / total * 100).toFixed(0);
     document.getElementById('sendingInfo').textContent =
         `Buffer ESP32: ${count}/${total} (${pct}%)`;
+}
+
+function updateEpochsProcessedUI() {
+    const el = document.getElementById('statEpochsProcessed');
+    if (!el) return;
+    const ok = state.epochsProcessed - state.epochsTimeout;
+    if (state.epochsTimeout > 0) {
+        el.innerHTML = `${state.epochsProcessed} / ${state.totalEpochs}` +
+            `<span class="epochs-timeout"> (${state.epochsTimeout} timeout)</span>`;
+    } else {
+        el.textContent = `${state.epochsProcessed} / ${state.totalEpochs}`;
+    }
 }
 
 function updateComparisonCards(result) {
@@ -2952,7 +3166,8 @@ function exportSession() {
         session: {
             fileName: state.fileRef ? state.fileRef.name : 'inconnu',
             totalEpochs: state.totalEpochs,
-            epochsProcessed: state.predictions.length,
+            epochsProcessed: state.epochsProcessed,
+            epochsTimeout: state.epochsTimeout,
         },
         predictions: state.predictions,
         annotations1: state.annotations1,
@@ -3008,6 +3223,8 @@ async function importSession(file) {
         state.totalCompared   = data.stats.totalCompared  || 0;
         state.totalTimeMs     = data.stats.totalTimeMs    || 0;
         state.totalEpochs     = data.session.totalEpochs  || state.predictions.length;
+        state.epochsProcessed = data.session.epochsProcessed || state.predictions.length;
+        state.epochsTimeout   = data.session.epochsTimeout   || 0;
         state.currentEpoch    = state.predictions.length  - 1;
 
         // S'assurer que matchA1/matchA2 sont presents (calcul si absent)
@@ -3044,6 +3261,7 @@ async function importSession(file) {
 
         // Mettre a jour toute l'interface
         updateStats();
+        updateEpochsProcessedUI();
         updateFilteredStats();
         drawHypnogram();
         drawSignal(state.currentEpoch);
